@@ -98,6 +98,54 @@ build-extproc:
 build-wasm:
 	@GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go -C $(EXTENSION_PATH) build -buildmode=c-shared -o ./out/plugin.wasm .
 
+.PHONY: check
+check: format lint test-coverage
+	$(MAKE) -C ../cli check
+
+.PHONY: format
+format:
+	@if [ "$(TYPE)" = "go" ]; then \
+		$(MAKE) format-go EXTENSION_PATH=$(EXTENSION_PATH); \
+	elif [ "$(TYPE)" = "rust" ]; then \
+		$(MAKE) format-rust EXTENSION_PATH=$(EXTENSION_PATH); \
+	else \
+		echo "Unsupported extension type: $(TYPE). Use 'make format-go' or 'make format-rust' explicitly."; \
+		exit 1; \
+	fi
+
+.PHONY: lint
+lint:
+	@if [ "$(TYPE)" = "go" ]; then \
+		$(MAKE) lint-go EXTENSION_PATH=$(EXTENSION_PATH); \
+	elif [ "$(TYPE)" = "rust" ]; then \
+		$(MAKE) lint-rust EXTENSION_PATH=$(EXTENSION_PATH); \
+	else \
+		echo "Unsupported extension type: $(TYPE). Use 'make lint-go' or 'make lint-rust' explicitly."; \
+		exit 1; \
+	fi
+
+.PHONY: test
+test:
+	@if [ "$(TYPE)" = "go" ]; then \
+		$(MAKE) test-go EXTENSION_PATH=$(EXTENSION_PATH); \
+	elif [ "$(TYPE)" = "rust" ]; then \
+		$(MAKE) test-rust EXTENSION_PATH=$(EXTENSION_PATH); \
+	else \
+		echo "Unsupported extension type: $(TYPE). Use 'make test-go' or 'make test-rust' explicitly."; \
+		exit 1; \
+	fi
+
+.PHONY: test-coverage
+test-coverage:
+	@if [ "$(TYPE)" = "go" ]; then \
+		$(MAKE) test-go-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
+	elif [ "$(TYPE)" = "rust" ]; then \
+		$(MAKE) test-rust-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
+	else \
+		echo "Unsupported extension type: $(TYPE). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."; \
+		exit 1; \
+	fi
+
 .PHONY: format-go
 format-go:
 	@echo "format => ./$(EXTENSION_PATH)/..."
@@ -115,7 +163,7 @@ GO_TEST_ARGS ?=
 test-go:
 	@go test -C $(EXTENSION_PATH) $(GO_TEST_ARGS) ./...
 
-.PHONY: test-coverage
+.PHONY: test-go-coverage
 test-go-coverage:
 	@mkdir -p ./$(EXTENSION_PATH)/out
 	@$(MAKE) test-go GO_TEST_ARGS="-coverprofile=./out/go-test-coverage.out \
