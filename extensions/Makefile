@@ -18,6 +18,19 @@ endif
 BOE_DATA_HOME ?= $(HOME)/.local/share/boe
 
 EXTENSION_PATH ?=
+# Try to automatically detect the EXTENSION_PATH if PWD is set from the shell
+ifneq ($(PWD),)
+	MAKEFILE_DIR = $(realpath $(dir $(firstword $(MAKEFILE_LIST))))
+	CWD          = $(realpath $(PWD))
+	ifneq ($(CWD), $(MAKEFILE_DIR)) # check that we are in a subdirectory and not the extension directory itself
+	ifneq ($(filter $(MAKEFILE_DIR)/%,$(CWD)), )
+	ifneq ($(wildcard $(CWD)/manifest.yaml),) # Check whether manifest.yaml exists by resolves to a file which yields the path or empty string
+		EXTENSION_PATH := $(CWD)
+	endif
+	endif
+	endif
+endif
+
 # Ensure the EXTENSION_PATH always be set
 ifeq ($(EXTENSION_PATH),)
   $(error "EXTENSION_PATH is not set. Please set it to the path of the extension.")
