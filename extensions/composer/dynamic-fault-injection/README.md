@@ -220,24 +220,25 @@ static_resources:
                   do_not_close: true
                 filter_name: latency_fault
                 filter_config:
-                  "@type": type.googleapis.com/google.protobuf.Struct
-                  endpoints:
-                    - match:
-                        prefix: "/api/v1/slow-endpoint"
-                      responses:
-                        - status: 200
-                          resolution: 900
-                          distribution:
-                            p0.0: "5ms"
-                            p50.0: "10ms"
-                            p90.0: "50ms"
-                            p99.0: "200ms"
-                            p100.0: "1s"
-                        - status: 503
-                          resolution: 100
-                          distribution:
-                            p0.0: "100ms"
-                            p100.0: "500ms"
+                  "@type": type.googleapis.com/google.protobuf.StringValue
+                  value: |
+                     endpoints:
+                       - match:
+                           prefix: "/api/v1/slow-endpoint"
+                         responses:
+                           - status: 200
+                             resolution: 900
+                             distribution:
+                               p0.0: "5ms"
+                               p50.0: "10ms"
+                               p90.0: "50ms"
+                               p99.0: "200ms"
+                               p100.0: "1s"
+                           - status: 503
+                             resolution: 100
+                             distribution:
+                               p0.0: "100ms"
+                               p100.0: "500ms"
             - name: envoy.filters.http.upstream_codec
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
