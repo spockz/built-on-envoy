@@ -100,13 +100,13 @@ func TestDistributionDelay(t *testing.T) {
 	t.Logf("average request time: %v", avgDelay)
 
 	// The actual elapsed delay should also be within the distribution range (20-300ms).
-	require.GreaterOrEqual(t, actualMinimalDelay.Milliseconds(), minimalDelay.Milliseconds(),
+	require.GreaterOrEqual(t, actualMinimalDelay, minimalDelay,
 		"elapsed delays should be at least p0 (20ms)")
-	require.LessOrEqual(t, actualMaximalDelay.Milliseconds(), (maximalDelay + millis(100)).Milliseconds(), // the 100ms is rather arbitrary buffer for network jitter, etc.
+	require.LessOrEqual(t, actualMaximalDelay, maximalDelay+millis(100), // the 100ms is rather arbitrary buffer for network jitter, etc.
 		"elapsed delay should be at most p100 + some buffer (300ms + 100ms)")
 
 	// Average should be roughly around 50ms (p50 of distribution).
-	require.Greater(t, avgDelay.Milliseconds(), millis(20),
+	require.Greater(t, avgDelay, millis(20),
 		"average delay should be meaningful (got %v)", avgDelay)
 }
 
@@ -150,14 +150,14 @@ func TestAbortInjection(t *testing.T) {
 		require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set")
 		targetDelay, err := time.ParseDuration(delayHeader)
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, targetDelay.Milliseconds(), minimalDelay.Milliseconds(),
+		require.GreaterOrEqual(t, targetDelay, minimalDelay,
 			"target delay should be at least p0")
-		require.LessOrEqual(t, targetDelay.Milliseconds(), maximalDelay.Milliseconds(),
+		require.LessOrEqual(t, targetDelay, maximalDelay,
 			"target delay should be within distribution range")
 
 		// The actual elapsed time should be at most the maximal delay plus a buffer for the
 		// upstream round-trip and network jitter.
-		require.LessOrEqual(t, elapsed.Milliseconds(), maximalDelay+time.Duration(100)*time.Millisecond,
+		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -204,21 +204,21 @@ func TestFixedDelayAccountsForUpstream(t *testing.T) {
 
 		// Total elapsed time should be ~100ms (target) regardless of upstream speed.
 		// Allow a small buffer below for timing slack and a larger buffer above for jitter.
-		require.GreaterOrEqual(t, elapsed.Milliseconds(), (fixedDelay - millis(10)).Milliseconds(),
-			"total request time should be at least ~100ms")
-		require.LessOrEqual(t, elapsed.Milliseconds(), (fixedDelay + millis(400)).Milliseconds(),
+		require.GreaterOrEqual(t, elapsed, fixedDelay-millis(10),
+			"total request time should be at least ~100ms (±10m for jitter)")
+		require.LessOrEqual(t, elapsed, fixedDelay+millis(400),
 			"total request time should not be excessively long")
 
 		// The target header should show the fixed delay.
 		delayHeader := resp.Header.Get("x-fault-injected-delay")
-		require.Equal(t, fmt.Sprintf("%dms", fixedDelay), delayHeader)
+		require.Equal(t, fmt.Sprintf("%dms", fixedDelay.Milliseconds()), delayHeader)
 
 		// The actual upstream time should be much less than the fixed delay.
 		upstreamHeader := resp.Header.Get("x-fault-actual-upstream")
 		require.NotEmpty(t, upstreamHeader)
 		upstreamTime, err := time.ParseDuration(upstreamHeader)
 		require.NoError(t, err)
-		require.Less(t, upstreamTime.Milliseconds(), (fixedDelay - millis(10)).Milliseconds(),
+		require.Less(t, upstreamTime, fixedDelay-millis(10),
 			"upstream time for /status/200 should be well under the fixed delay")
 
 		// The filter should have added the remaining delay (fixedDelay - upstream).
@@ -229,9 +229,9 @@ func TestFixedDelayAccountsForUpstream(t *testing.T) {
 
 		// upstream + added should approximate the fixed delay target.
 		totalDelay := upstreamTime + addedDelay
-		require.GreaterOrEqual(t, totalDelay.Milliseconds(), (fixedDelay - millis(10)).Milliseconds(),
+		require.GreaterOrEqual(t, totalDelay, fixedDelay-millis(10),
 			"upstream + added delay should be at least ~100ms")
-		require.LessOrEqual(t, totalDelay.Milliseconds(), (fixedDelay + millis(50)).Milliseconds(),
+		require.LessOrEqual(t, totalDelay, fixedDelay+millis(50),
 			"upstream + added delay should not overshoot significantly")
 
 		return true
@@ -284,14 +284,14 @@ func TestCatchallEndpoint(t *testing.T) {
 		// The catch-all distribution is p0=5ms, p50=10ms, p100=20ms.
 		targetDelay, err := time.ParseDuration(resp.Header.Get("x-fault-injected-delay"))
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, targetDelay.Milliseconds(), minimalDelay.Milliseconds(),
+		require.GreaterOrEqual(t, targetDelay, minimalDelay,
 			"target delay should be at least p0")
-		require.LessOrEqual(t, targetDelay.Milliseconds(), maximalDelay.Milliseconds(),
+		require.LessOrEqual(t, targetDelay, maximalDelay,
 			"target delay should be at most p100")
 
 		// The actual elapsed time should be at most the maximal delay plus a buffer for the
 		// upstream round-trip and network jitter.
-		require.LessOrEqual(t, elapsed.Milliseconds(), (maximalDelay + millis(100)).Milliseconds(),
+		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -356,24 +356,24 @@ func TestMixedStatusCodes(t *testing.T) {
 
 		if resp.StatusCode == 429 {
 			// 429 distribution: p0=0ms, p100=5ms.
-			require.GreaterOrEqualf(t, targetDelay.Milliseconds(), minimalDelay429.Milliseconds(),
+			require.GreaterOrEqualf(t, targetDelay, minimalDelay429,
 				"429 target delay should be at least p0 (%v)", minimalDelay429)
-			require.LessOrEqual(t, targetDelay.Milliseconds(), maximalDelay429.Milliseconds(),
+			require.LessOrEqual(t, targetDelay, maximalDelay429,
 				"429 target delay should be within distribution range (%v - %v)", minimalDelay429, maximalDelay429)
 			// The actual elapsed time should be at most the maximal delay plus a buffer for the
 			// upstream round-trip and network jitter.
-			require.LessOrEqual(t, elapsed.Milliseconds(), (maximalDelay429 + millis(100)).Milliseconds(),
+			require.LessOrEqual(t, elapsed, maximalDelay429+millis(100),
 				"429 elapsed time should be at most p100 + buffer")
 			got429 = true
 		} else {
 			// 200 distribution: p0=30ms, p50=50ms, p100=80ms.
-			require.GreaterOrEqualf(t, targetDelay.Milliseconds(), minimalDelay200.Milliseconds(),
+			require.GreaterOrEqualf(t, targetDelay, minimalDelay200,
 				"200 target delay should be at least p0 (%v)", minimalDelay200)
-			require.LessOrEqualf(t, targetDelay.Milliseconds(), maximalDelay200.Milliseconds(),
+			require.LessOrEqualf(t, targetDelay, maximalDelay200,
 				"200 target delay should be at most p100 (%v)", maximalDelay200)
 			// The actual elapsed time should be at most the maximal delay plus a buffer for the
 			// upstream round-trip and network jitter.
-			require.LessOrEqual(t, elapsed.Milliseconds(), (maximalDelay200 + millis(100)).Milliseconds(),
+			require.LessOrEqual(t, elapsed, maximalDelay200+millis(100),
 				"200 elapsed time should be at most p100 + buffer")
 			// When the sampled status is 200, upstream response passes through.
 			gotUpstream = true
@@ -432,9 +432,9 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 		require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set")
 		targetDelay, err := time.ParseDuration(delayHeader)
 		require.NoError(t, err)
-		require.GreaterOrEqualf(t, targetDelay.Milliseconds(), minimalDelay.Milliseconds(),
+		require.GreaterOrEqualf(t, targetDelay, minimalDelay,
 			"target delay should be at least p0 (%v)", targetDelay)
-		require.LessOrEqualf(t, targetDelay.Milliseconds(), maximalDelay.Milliseconds(),
+		require.LessOrEqualf(t, targetDelay, maximalDelay,
 			"target delay should be at most p100 (%v)", targetDelay)
 
 		// The upstream time should reflect httpbin's /delay/0.05 (~50ms).
@@ -442,7 +442,7 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 		require.NotEmpty(t, upstreamHeader, "x-fault-actual-upstream header should be set")
 		upstreamTime, err := time.ParseDuration(upstreamHeader)
 		require.NoError(t, err)
-		require.GreaterOrEqual(t, upstreamTime.Milliseconds(), (upstreamDelay - millis(10)).Milliseconds(),
+		require.GreaterOrEqual(t, upstreamTime, upstreamDelay-millis(10),
 			"upstream time should reflect httpbin /delay/0.05 (~50ms)")
 
 		// If the target was less than upstream time, no additional delay should be added.
@@ -451,7 +451,7 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 			addedDelay, err := time.ParseDuration(addedHeader)
 			require.NoError(t, err)
 			// Added delay should never exceed the target.
-			require.LessOrEqual(t, addedDelay.Milliseconds(), targetDelay.Milliseconds(),
+			require.LessOrEqual(t, addedDelay, targetDelay,
 				"added delay should not exceed target delay")
 		}
 
@@ -465,9 +465,9 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 			minimalDelay,
 			maximalDelay,
 			millis(100))
-		require.GreaterOrEqual(t, elapsed.Milliseconds(), (upstreamDelay - millis(10)).Milliseconds(),
+		require.GreaterOrEqual(t, elapsed, upstreamDelay-millis(10),
 			"elapsed time should be at least the upstream delay (~50ms)")
-		require.LessOrEqual(t, elapsed.Milliseconds(), (maximalDelay + millis(100)).Milliseconds(),
+		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -506,14 +506,14 @@ func requireMinimalMaximalAndAverageDurations(t *testing.T, durations []time.Dur
 	avgDelay := totalDelay / time.Duration(numRequests)
 	t.Logf("average request time: %v", avgDelay)
 
-	require.GreaterOrEqualf(t, actualMinimalDelay.Milliseconds(), expectedMinDelay.Milliseconds(),
+	require.GreaterOrEqualf(t, actualMinimalDelay, expectedMinDelay,
 		"elapsed delays should be at least p0 (%dms)", expectedMinDelay)
-	require.LessOrEqualf(t, actualMaximalDelay.Milliseconds(), (expectedMaxDelay + tolerance).Milliseconds(),
+	require.LessOrEqualf(t, actualMaximalDelay, expectedMaxDelay+tolerance,
 		"elapsed delay should be at most p100 + some buffer (%dms + %dms)", expectedMaxDelay, tolerance)
 
 	// Average should be roughly around 50ms (p50 of distribution).
-	require.InDelta(t, expectedAvgDelay,
-		avgDelay,
+	require.InDelta(t, expectedAvgDelay.Milliseconds(),
+		avgDelay.Milliseconds(),
 		float64(averageTolerance.Milliseconds()),
 		"average delay should be %v ± %v [%v,%v, got %v]", expectedAvgDelay, averageTolerance, expectedAvgDelay-averageTolerance, expectedAvgDelay+averageTolerance, avgDelay)
 }
