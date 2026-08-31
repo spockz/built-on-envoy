@@ -384,7 +384,7 @@ func TestMixedStatusCodes(t *testing.T) {
 
 func TestUpstreamTimeIsSubtracted(t *testing.T) {
 	minimalDelay := millis(20)
-	maximalDelay := millis(300)
+	maximalDelay := millis(100)
 	// httpbin's /delay/0.05 simulates a ~50ms upstream response time.
 	upstreamDelay := millis(50)
 	config := fmt.Sprintf(`{
@@ -398,8 +398,7 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 					"distribution": {
 						"p0.0": "%dms",
 						"p50.0": "50ms",
-						"p90.0": "100ms",
-						"p99.0": "200ms",
+						"p99.0": "50ms",
 						"p100.0": "%dms"
 					}
 				}
@@ -461,7 +460,7 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 
 		requireMinimalMaximalAndAverageDurations(t,
 			[]time.Duration{elapsed},
-			upstreamTime, millis(20),
+			upstreamTime, millis(30),
 			minimalDelay,
 			maximalDelay,
 			millis(100))
