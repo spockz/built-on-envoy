@@ -18,8 +18,16 @@ import (
 
 // FilterConfig is the top-level configuration for the latency/fault filter.
 type FilterConfig struct {
-	Endpoints []EndpointConfig `yaml:"endpoints"`
+	Endpoints               []EndpointConfig `yaml:"endpoints"`
+	ProbabilityDistribution string           `yaml:"probability_distribution,omitempty"`
 }
+
+const (
+	// ProbabilityDistributionStateful uses StatefulProbabilityDistribution.
+	ProbabilityDistributionStateful = "stateful"
+	// ProbabilityDistributionStateless uses ProbabilityDistribution.
+	ProbabilityDistributionStateless = "stateless"
+)
 
 // EndpointConfig defines fault behavior for a matched endpoint.
 type EndpointConfig struct {
@@ -68,8 +76,18 @@ func ParseConfig(data []byte) (*FilterConfig, error) {
 		return nil, fmt.Errorf("failed to parse filter config: %w", err)
 	}
 
-	// Validate endpoints.
+	// Default to stateful sampling when not explicitly configured.
+	if cfg.ProbabilityDistribution == "" {
+		cfg.ProbabilityDistribution = ProbabilityDistributionStateful
+	}
+
+	// Validate top-level options.
 	validationErrors := []error{}
+	if cfg.ProbabilityDistribution != ProbabilityDistributionStateful && cfg.ProbabilityDistribution != ProbabilityDistributionStateless {
+		validationErrors = append(validationErrors, fmt.Errorf("probability_distribution must be one of %q or %q, got %q", ProbabilityDistributionStateful, ProbabilityDistributionStateless, cfg.ProbabilityDistribution))
+	}
+
+	// Validate endpoints.
 	for i, ep := range cfg.Endpoints {
 		if len(ep.Responses) == 0 && ep.LoadBased == nil {
 			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: must have at least 'responses' or 'load_based' configured", i))

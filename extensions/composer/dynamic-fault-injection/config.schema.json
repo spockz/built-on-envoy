@@ -7,6 +7,12 @@
   "additionalProperties": false,
   "required": ["endpoints"],
   "properties": {
+    "probability_distribution": {
+      "type": "string",
+      "description": "Selects latency sampling mode for response distributions.",
+      "enum": ["stateful", "stateless"],
+      "default": "stateful"
+    },
     "endpoints": {
       "type": "array",
       "description": "List of endpoint configurations, each defining fault behavior for matched routes.",

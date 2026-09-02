@@ -10,10 +10,15 @@ package fault
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
 	"sync"
 	"time"
 )
+
+type durationDistribution interface {
+	Sample() time.Duration
+}
 
 // ProbabilityDistribution samples from a distribution using linear interpolation
 // between percentile boundaries. Stateless — each sample is independent.
@@ -149,11 +154,17 @@ type ResponseDistribution struct {
 type responseEntry struct {
 	status       int
 	weight       int
-	distribution *StatefulProbabilityDistribution
+	distribution durationDistribution
 }
 
 // NewResponseDistribution creates a ResponseDistribution from a set of StatusDistributions.
 func NewResponseDistribution(statusDists []StatusDistribution) (*ResponseDistribution, error) {
+	return NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
+}
+
+// NewResponseDistributionWithMode creates a ResponseDistribution with the requested
+// sampling mode: "stateful" or "stateless".
+func NewResponseDistributionWithMode(statusDists []StatusDistribution, distributionMode string) (*ResponseDistribution, error) {
 	entries := make([]responseEntry, 0, len(statusDists))
 	totalWeight := 0
 
@@ -162,7 +173,10 @@ func NewResponseDistribution(statusDists []StatusDistribution) (*ResponseDistrib
 		if err != nil {
 			return nil, err
 		}
-		dist := NewStatefulProbabilityDistribution(percentiles, sd.Resolution)
+		dist, err := newDurationDistribution(percentiles, sd.Resolution, distributionMode)
+		if err != nil {
+			return nil, err
+		}
 		entries = append(entries, responseEntry{
 			status:       sd.Status,
 			weight:       sd.Resolution,
@@ -228,11 +242,31 @@ func NewLoadBasedResponseDistribution(
 	tippingRPS float64,
 	gz *GreyZoneConfig,
 ) (*LoadBasedResponseDistribution, error) {
-	healthy, err := NewResponseDistribution(healthyDists)
+	return NewLoadBasedResponseDistributionWithMode(
+		healthyDists,
+		healthyRPS,
+		tippingDists,
+		tippingRPS,
+		gz,
+		ProbabilityDistributionStateful,
+	)
+}
+
+// NewLoadBasedResponseDistributionWithMode creates a load-based distribution
+// using either stateful or stateless sampling.
+func NewLoadBasedResponseDistributionWithMode(
+	healthyDists []StatusDistribution,
+	healthyRPS float64,
+	tippingDists []StatusDistribution,
+	tippingRPS float64,
+	gz *GreyZoneConfig,
+	distributionMode string,
+) (*LoadBasedResponseDistribution, error) {
+	healthy, err := NewResponseDistributionWithMode(healthyDists, distributionMode)
 	if err != nil {
 		return nil, err
 	}
-	tipping, err := NewResponseDistribution(tippingDists)
+	tipping, err := NewResponseDistributionWithMode(tippingDists, distributionMode)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +291,17 @@ func NewLoadBasedResponseDistribution(
 	}
 
 	return lb, nil
+}
+
+func newDurationDistribution(percentiles []Percentile, resolution int, distributionMode string) (durationDistribution, error) {
+	switch distributionMode {
+	case ProbabilityDistributionStateful:
+		return NewStatefulProbabilityDistribution(percentiles, resolution), nil
+	case ProbabilityDistributionStateless:
+		return NewProbabilityDistribution(percentiles), nil
+	default:
+		return nil, fmt.Errorf("unsupported probability distribution mode: %q", distributionMode)
+	}
 }
 
 // Sample returns a response based on the current RPS.

@@ -237,6 +237,49 @@ func TestResponseDistribution_FlatDistribution(t *testing.T) {
 	}
 }
 
+func TestResponseDistribution_StatelessMode(t *testing.T) {
+	statusDists := []StatusDistribution{
+		{
+			Status:     200,
+			Resolution: 100,
+			Distribution: map[string]string{
+				"p0.0":   "5ms",
+				"p100.0": "5ms",
+			},
+		},
+	}
+
+	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateless)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for range 100 {
+		sample := rd.Sample()
+		if sample.Duration != 5*time.Millisecond {
+			t.Fatalf("expected fixed 5ms sample, got %v", sample.Duration)
+		}
+	}
+}
+
+func TestResponseDistribution_InvalidMode(t *testing.T) {
+	statusDists := []StatusDistribution{
+		{
+			Status:     200,
+			Resolution: 100,
+			Distribution: map[string]string{
+				"p0.0":   "1ms",
+				"p100.0": "10ms",
+			},
+		},
+	}
+
+	_, err := NewResponseDistributionWithMode(statusDists, "invalid")
+	if err == nil {
+		t.Fatal("expected error for invalid probability distribution mode")
+	}
+}
+
 func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 	healthyDists := []StatusDistribution{
 		{
