@@ -63,6 +63,53 @@ endpoints:
 	if ep.Responses[1].Resolution != 10 {
 		t.Errorf("expected resolution 10, got %d", ep.Responses[1].Resolution)
 	}
+	if cfg.ProbabilityDistribution != ProbabilityDistributionStateful {
+		t.Errorf("expected default probability_distribution %q, got %q", ProbabilityDistributionStateful, cfg.ProbabilityDistribution)
+	}
+}
+
+func TestParseConfig_ProbabilityDistributionStateless(t *testing.T) {
+	input := `
+probability_distribution: stateless
+endpoints:
+  - match:
+      prefix: "/api/"
+    responses:
+      - status: 200
+        resolution: 100
+        distribution:
+          p0.0: "1ms"
+          p100.0: "10ms"
+`
+
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.ProbabilityDistribution != ProbabilityDistributionStateless {
+		t.Fatalf("expected probability_distribution %q, got %q", ProbabilityDistributionStateless, cfg.ProbabilityDistribution)
+	}
+}
+
+func TestParseConfig_InvalidProbabilityDistribution(t *testing.T) {
+	input := `
+probability_distribution: random
+endpoints:
+  - match:
+      prefix: "/api/"
+    responses:
+      - status: 200
+        resolution: 100
+        distribution:
+          p0.0: "1ms"
+          p100.0: "10ms"
+`
+
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for invalid probability_distribution")
+	}
 }
 
 func TestParseConfig_LoadBased(t *testing.T) {

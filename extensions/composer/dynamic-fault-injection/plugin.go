@@ -223,7 +223,7 @@ func buildFilterFactory(config []byte) (*latencyFaultFilterFactory, error) {
 
 		// Build the simple response distribution if responses are configured.
 		if len(ep.Responses) > 0 {
-			dist, err := fault.NewResponseDistribution(ep.Responses)
+			dist, err := fault.NewResponseDistributionWithMode(ep.Responses, cfg.ProbabilityDistribution)
 			if err != nil {
 				return nil, fmt.Errorf("endpoint %d: failed to build response distribution: %w", i, err)
 			}
@@ -232,12 +232,13 @@ func buildFilterFactory(config []byte) (*latencyFaultFilterFactory, error) {
 
 		// Build the load-based distribution if configured.
 		if ep.LoadBased != nil {
-			lb, err := fault.NewLoadBasedResponseDistribution(
+			lb, err := fault.NewLoadBasedResponseDistributionWithMode(
 				ep.LoadBased.Healthy.Responses,
 				ep.LoadBased.Healthy.ThresholdRPS,
 				ep.LoadBased.TippingPoint.Responses,
 				ep.LoadBased.TippingPoint.ThresholdRPS,
 				ep.LoadBased.GreyZone,
+				cfg.ProbabilityDistribution,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("endpoint %d: failed to build load-based distribution: %w", i, err)
