@@ -209,8 +209,8 @@ longDescription: |
 
   ### Load-Based Behavior
 
-  [!IMPORTANT]
-  As of yet the load-based behaviour needs to be implemented still.
+  > [!IMPORTANT]
+  > As of yet the load-based behaviour needs to be implemented still.
 
   When `load_based` is configured:
   - Below `healthy.threshold_rps`: Uses the healthy response distribution
