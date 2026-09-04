@@ -49,6 +49,8 @@ TIMESTAMP        := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 COMMIT_SHA       := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 AUTHOR           := $(shell $(GO_TOOL) yq '.author' manifest.yaml)
 LICENSE          := Apache-2.0
+HAS_GOLANG       := $(if $(strip $(shell find "$(EXTENSION_PATH)" -type f -name '*.go' -print -quit 2>/dev/null)),true,false)
+HAS_RUST         := $(if $(strip $(shell find "$(EXTENSION_PATH)" -type f -name '*.rs' -print -quit 2>/dev/null)),true,false)
 
 HUB    := $(or $(BOE_REGISTRY),$(OCI_REGISTRY)/built-on-envoy)
 IMAGE  := $(HUB)/extension-$(NAME):$(VERSION)$(IMAGE_NONCE)
@@ -100,49 +102,51 @@ build-wasm:
 
 .PHONY: check
 check: format lint test-coverage
+	# In addition to checking the extension code also generate the datasource files for the portal
+	# to ensure that the manifest.yaml is filled in "correctly".
 	$(MAKE) -C ../cli check
 
 .PHONY: format
 format:
-	@if [ "$(TYPE)" = "go" ]; then \
+	@if [ "$(HAS_GOLANG)" = "true" ]; then \
 		$(MAKE) format-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(TYPE)" = "rust" ]; then \
+	elif [ "$(HAS_RUST)" = "true" ]; then \
 		$(MAKE) format-rust EXTENSION_PATH=$(EXTENSION_PATH); \
 	else \
-		echo "Unsupported extension type: $(TYPE). Use 'make format-go' or 'make format-rust' explicitly."; \
+		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make format-go' or 'make format-rust' explicitly."; \
 		exit 1; \
 	fi
 
 .PHONY: lint
 lint:
-	@if [ "$(TYPE)" = "go" ]; then \
+	@if [ "$(HAS_GOLANG)" = "true" ]; then \
 		$(MAKE) lint-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(TYPE)" = "rust" ]; then \
+	elif [ "$(HAS_RUST)" = "true" ]; then \
 		$(MAKE) lint-rust EXTENSION_PATH=$(EXTENSION_PATH); \
 	else \
-		echo "Unsupported extension type: $(TYPE). Use 'make lint-go' or 'make lint-rust' explicitly."; \
+		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make lint-go' or 'make lint-rust' explicitly."; \
 		exit 1; \
 	fi
 
 .PHONY: test
 test:
-	@if [ "$(TYPE)" = "go" ]; then \
+	@if [ "$(HAS_GOLANG)" = "true" ]; then \
 		$(MAKE) test-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(TYPE)" = "rust" ]; then \
+	elif [ "$(HAS_RUST)" = "true" ]; then \
 		$(MAKE) test-rust EXTENSION_PATH=$(EXTENSION_PATH); \
 	else \
-		echo "Unsupported extension type: $(TYPE). Use 'make test-go' or 'make test-rust' explicitly."; \
+		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go' or 'make test-rust' explicitly."; \
 		exit 1; \
 	fi
 
 .PHONY: test-coverage
 test-coverage:
-	@if [ "$(TYPE)" = "go" ]; then \
+	@if [ "$(HAS_GOLANG)" = "true" ]; then \
 		$(MAKE) test-go-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(TYPE)" = "rust" ]; then \
+	elif [ "$(HAS_RUST)" = "true" ]; then \
 		$(MAKE) test-rust-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
 	else \
-		echo "Unsupported extension type: $(TYPE). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."; \
+		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."; \
 		exit 1; \
 	fi
 
@@ -239,7 +243,6 @@ push_rust: create_builder
 		--file Dockerfile.rust ./$(EXTENSION_PATH)
 
 .PHONY: push_extproc
-push_extproc:
 push_extproc: create_builder
 	@echo "Building and pushing ExtProc extension image for multiple architectures: $(IMAGE)"
 	@GO_VERSION=$$(sed -ne 's/^go //gp' $(EXTENSION_PATH)/go.mod); \
