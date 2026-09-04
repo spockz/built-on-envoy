@@ -14,6 +14,8 @@ import (
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared/mocks"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
 // Valid YAML config for testing.
@@ -34,6 +36,15 @@ endpoints:
           p0.0: "50ms"
           p50.0: "100ms"
           p99.0: "500ms"
+`)
+
+var ValidPerRouteConfig = []byte(`
+responses:
+  - status: 200
+    resolution: 100
+    distribution:
+      p0.0: "1ms"
+      p100.0: "5ms"
 `)
 
 // Tests for CustomHttpFilterConfigFactory.Create
@@ -114,13 +125,21 @@ endpoints:
 func TestConfigFactory_CreatePerRoute_ValidConfig(t *testing.T) {
 	factory := &CustomHttpFilterConfigFactory{}
 
-	result, err := factory.CreatePerRoute(ValidConfig)
+	result, err := factory.CreatePerRoute(ValidPerRouteConfig)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
 	perRoute, ok := result.(*latencyFaultFilterFactory)
 	require.True(t, ok)
-	require.Len(t, perRoute.endpoints, 1)
+	require.True(t, perRoute.direct)
+	require.NotNil(t, perRoute.distribution)
+}
+
+func TestConfigFactory_CreatePerRoute_RejectsEndpoints(t *testing.T) {
+	result, err := (&CustomHttpFilterConfigFactory{}).CreatePerRoute(ValidConfig)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "endpoints cannot be used in per-route configuration")
 }
 
 func TestConfigFactory_CreatePerRoute_InvalidConfig(t *testing.T) {
@@ -142,19 +161,7 @@ func TestPerRouteConfigOverride(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("per-route config overrides factory", func(t *testing.T) {
-		perRouteConfig := []byte(`
-endpoints:
-  - match:
-      exact: "/health"
-    responses:
-      - status: 200
-        resolution: 100
-        distribution:
-          p0.0: "0ms"
-          p50.0: "1ms"
-          p99.0: "5ms"
-`)
-		perRouteFactory, err := buildFilterFactory(perRouteConfig)
+		perRouteFactory, err := buildFilterFactoryForSource(ValidPerRouteConfig, fault.PerRouteConfigSource)
 		require.NoError(t, err)
 
 		handle := newFilterHandleWithPerRouteConfig(ctrl, perRouteFactory)
@@ -162,8 +169,8 @@ endpoints:
 		f, ok := filter.(*latencyFaultFilter)
 		require.True(t, ok)
 		// The per-route factory should be used.
-		require.Len(t, f.factory.endpoints, 1)
-		require.Equal(t, "/health", f.factory.endpoints[0].match.Exact)
+		require.True(t, f.factory.direct)
+		require.NotNil(t, f.factory.distribution)
 	})
 
 	t.Run("nil per-route config uses base factory", func(t *testing.T) {

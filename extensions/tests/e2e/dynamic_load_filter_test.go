@@ -8,7 +8,12 @@ package integration
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +113,69 @@ func TestDistributionDelay(t *testing.T) {
 	// Average should be roughly around 50ms (p50 of distribution).
 	require.Greater(t, avgDelay, millis(20),
 		"average delay should be meaningful (got %v)", avgDelay)
+}
+
+func TestDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.T) {
+	config := `{
+  "responses": [
+    {
+      "status": 200,
+      "resolution": 1000,
+      "distribution": {"p0.0": "1ms", "p100.0": "5ms"}
+    }
+  ]
+}`
+	proxyPort := startFaultInjectionEnvoy(t, config)
+	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/direct", proxyPort), nil)
+	require.NoError(t, err)
+
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, _ time.Duration) bool {
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.ReadAll(resp.Body)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		require.Equal(t, "404", resp.Header.Get("x-fault-status"))
+		require.Equal(t, "0s", resp.Header.Get("x-fault-injected-delay"))
+		require.Equal(t, "0s", resp.Header.Get("x-fault-added-delay"))
+		require.NotEmpty(t, resp.Header.Get("x-fault-actual-upstream"))
+		return true
+	})
+}
+
+func TestPerRouteConfiguration(t *testing.T) {
+	routes := "- match:\n" +
+		"    prefix: /anything/\n" +
+		"    headers:\n" +
+		"      - name: :method\n" +
+		"        exact_match: GET\n" +
+		"  typed_per_filter_config:\n" +
+		"    dynamic-fault-injection:\n" +
+		"      '@type': type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilterPerRoute\n" +
+		"      dynamic_module_config: { name: composer }\n" +
+		"      filter_name: dynamic-fault-injection\n" +
+		"      filter_config:\n" +
+		"        '@type': type.googleapis.com/google.protobuf.StringValue\n" +
+		"        value: |\n" +
+		"          responses:\n" +
+		"            - status: 200\n" +
+		"              resolution: 100\n" +
+		"              distribution:\n" +
+		"                p0.0: 20ms\n" +
+		"                p100.0: 20ms\n" +
+		"  route:\n" +
+		"    cluster: test-upstream"
+	proxyPort := startFaultInjectionEnvoyWithRoutes(t, routes)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:%d/anything/per-route", proxyPort), nil)
+	require.NoError(t, err)
+
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.ReadAll(resp.Body)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, "200", resp.Header.Get("x-fault-status"))
+		require.Equal(t, "20ms", resp.Header.Get("x-fault-injected-delay"))
+		require.GreaterOrEqual(t, elapsed, 20*time.Millisecond)
+		return true
+	})
 }
 
 func TestAbortInjection(t *testing.T) {
@@ -366,17 +434,26 @@ func TestMixedStatusCodes(t *testing.T) {
 				"429 elapsed time should be at most p100 + buffer")
 			got429 = true
 		} else {
-			// 200 distribution: p0=30ms, p50=50ms, p100=80ms.
-			require.GreaterOrEqualf(t, targetDelay, minimalDelay200,
-				"200 target delay should be at least p0 (%v)", minimalDelay200)
-			require.LessOrEqualf(t, targetDelay, maximalDelay200,
-				"200 target delay should be at most p100 (%v)", maximalDelay200)
-			// The actual elapsed time should be at most the maximal delay plus a buffer for the
-			// upstream round-trip and network jitter.
-			require.LessOrEqual(t, elapsed, maximalDelay200+millis(100),
-				"200 elapsed time should be at most p100 + buffer")
-			// When the sampled status is 200, upstream response passes through.
-			gotUpstream = true
+			if resp.StatusCode == 200 {
+				// 200 distribution: p0=30ms, p50=50ms, p100=80ms.
+				require.GreaterOrEqualf(t, targetDelay, minimalDelay200,
+					"200 target delay should be at least p0 (%v)", minimalDelay200)
+				require.LessOrEqualf(t, targetDelay, maximalDelay200,
+					"200 target delay should be at most p100 (%v)", maximalDelay200)
+				// The actual elapsed time should be at most the maximal delay plus a buffer for the
+				// upstream round-trip and network jitter.
+				require.LessOrEqual(t, elapsed, maximalDelay200+millis(100),
+					"200 elapsed time should be at most p100 + buffer")
+				gotUpstream = true
+			} else {
+				// Unconfigured upstream statuses pass through and expose zero injected delay.
+				require.Equal(t, http.StatusNotFound, resp.StatusCode)
+				require.Equal(t, time.Duration(0), targetDelay)
+				require.Equal(t, "404", resp.Header.Get("x-fault-status"))
+				require.Equal(t, "0s", resp.Header.Get("x-fault-added-delay"))
+				require.NotEmpty(t, resp.Header.Get("x-fault-actual-upstream"))
+				gotUpstream = true
+			}
 		}
 		return gotUpstream && got429 // By requiring that both statuses are seen, we ensure we see both 200 and 429 at one point.
 	})
@@ -485,6 +562,78 @@ func startFaultInjectionEnvoy(t *testing.T, config string) (proxyPort int) {
 		"--local", "../../composer/dynamic-fault-injection",
 		"--config", config)
 
+	return proxyPort
+}
+
+// startFaultInjectionEnvoyWithRoutes provides shared bootstrap wiring while
+// callers specify only the route configuration under test.
+func startFaultInjectionEnvoyWithRoutes(t *testing.T, routes string) (proxyPort int) {
+	t.Helper()
+	ports := internaltesting.FreePorts(t, 2)
+	proxyPort, adminPort := ports[0], ports[1]
+	moduleDir := t.TempDir()
+	modulePath := filepath.Join(moduleDir, "libcomposer.so")
+	build := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-o", modulePath, "./main") // #nosec G204 -- fixed command and repository-relative package.
+	build.Dir = "../../composer"
+	output, err := build.CombinedOutput()
+	require.NoErrorf(t, err, "build composer: %s", output)
+
+	upstream := internaltesting.TestUpstreamClusterInsecure.Get()
+	require.NotEmpty(t, upstream)
+	upstreamHost, upstreamPort, err := net.SplitHostPort(upstream)
+	require.NoError(t, err)
+	upstreamPortNumber, err := strconv.ParseUint(upstreamPort, 10, 32)
+	require.NoError(t, err)
+	routeConfig := strings.TrimSpace(routes)
+	routeConfig = "                        " + strings.ReplaceAll(routeConfig, "\n", "\n                        ")
+	bootstrap := fmt.Sprintf(`admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: %d }
+static_resources:
+  listeners:
+    - name: main
+      address:
+        socket_address: { address: 127.0.0.1, port_value: %d }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                http_filters:
+                  - name: dynamic-fault-injection
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                      dynamic_module_config: { name: composer }
+                      filter_name: dynamic-fault-injection
+                      filter_config:
+                        "@type": type.googleapis.com/google.protobuf.StringValue
+                        value: "endpoints: []"
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: routes
+                  virtual_hosts:
+                    - name: default
+                      domains: ["*"]
+                      routes:
+%s
+  clusters:
+    - name: test-upstream
+      type: STATIC
+      load_assignment:
+        cluster_name: test-upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: %s, port_value: %d }
+`, adminPort, proxyPort, routeConfig, upstreamHost, upstreamPortNumber)
+	internaltesting.RunEnvoyYAML(t, proxyPort, adminPort, bootstrap, map[string]string{
+		"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": moduleDir,
+		"GODEBUG":                           "cgocheck=0",
+	})
 	return proxyPort
 }
 

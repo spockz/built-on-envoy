@@ -31,7 +31,7 @@ If the upstream is already slower than the target, no additional delay is added.
 | gRPC abort | ✅ | 🚧 (planned) |
 | Header-controlled faults | ✅ | ❌ (route-based instead) |
 | Response rate limiting | ✅ | ❌ |
-| Per-route configuration | Via per-route config | Built-in route matching |
+| Per-route configuration | Via Envoy per-route config | Supported |
 | Runtime configuration | ✅ | ❌ |
 | Exact distribution over N requests | ❌ | ✅ (stateful distribution) |
 
@@ -116,6 +116,51 @@ $> curl -v http://localhost:10000/status/503
 
 ## Configuration
 
+The filter supports two configuration shapes. Filter-level configuration supports a
+`endpoints[]` selector for launchers that cannot express Envoy route-level filter configuration.
+When configuration is supplied through Envoy's `typed_per_filter_config`, use the direct behavior
+shape (`responses` or `load_based`) and let Envoy perform route matching. `endpoints[]` is rejected
+in per-route configuration.
+
+For example, a per-route configuration is:
+
+```yaml
+responses:
+  - status: 200
+    resolution: 1000
+    distribution:
+      p0.0: "5ms"
+      p100.0: "200ms"
+```
+
+The route-specific value is placed under the filter name in Envoy:
+
+```yaml
+typed_per_filter_config:
+  dynamic-fault-injection:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilterPerRoute
+    dynamic_module_config:
+      name: composer
+    filter_name: dynamic-fault-injection
+    filter_config:
+      "@type": type.googleapis.com/google.protobuf.StringValue
+      value: |
+        responses:
+          - status: 200
+            resolution: 1000
+            distribution:
+              p0.0: "5ms"
+              p100.0: "200ms"
+```
+
+The filter-level `endpoints[]` configuration and the per-route direct configuration are separate
+mechanisms. A route-level configuration replaces the filter-level behavior for that route.
+
+If the upstream responds with a status code that has no configured behavior for the selected
+endpoint/per-route config, the filter passes the response through without injecting latency and
+still sets fault metadata headers: `x-fault-injected-delay: 0s`, `x-fault-added-delay: 0s`,
+`x-fault-status: <upstream status>`, and `x-fault-actual-upstream: <measured duration>`.
+
 The filter is configured as native YAML in the Envoy config using `google.protobuf.StringValue` as the `filter_config` type.
 Envoy parses the YAML natively and serializes it as JSON to the module — no string escaping or `value: |` indirection needed.
 Please find an overview of the possible fields below, followed by an actual example of how to configure the filter as a per cluster http filter.
@@ -136,6 +181,94 @@ Please find an overview of the possible fields below, followed by an actual exam
 | `endpoints[].load_based.healthy` | Behavior below the healthy RPS threshold |
 | `endpoints[].load_based.tipping_point` | Behavior above the tipping point RPS |
 | `endpoints[].load_based.grey_zone` | Transition parameters between healthy and tipping |
+
+### Matching a Virtual Host, Method, and Path Template
+
+#### Filter-Level (`endpoints[]`, not per-route)
+
+The `endpoints[]` matcher supports only `prefix` and `exact` path matching.
+It does not support URI templates directly (for example, `/foo/bar/{id}`).
+
+The following `endpoints[]` example approximates `/foo/bar/{id}` by matching
+the `/foo/bar/` prefix and adding host/method header checks:
+
+```yaml
+endpoints:
+  - match:
+      prefix: "/foo/bar/"
+      headers:
+        - name: "host"
+          exact_match: "api.example.com"
+        - name: ":method"
+          exact_match: "GET"
+    responses:
+      - status: 200
+        resolution: 100
+        distribution:
+          p0.0: "5ms"
+          p100.0: "20ms"
+```
+
+If you need richer routing semantics, match at the Envoy route layer and pass
+direct per-route behavior to this filter.
+
+#### Per-Route (`typed_per_filter_config`)
+
+Important details for Envoy setup:
+
+- Configure this extension as an HTTP filter in the same
+  `HttpConnectionManager` that owns the route.
+- The key under `typed_per_filter_config` must match that HTTP filter
+  instance `name`.
+
+The following `HttpConnectionManager` excerpt contains the required filter
+chain and route override. Its listener and cluster definitions are omitted; see
+the [complete E2E-derived bootstrap](#appendix-complete-per-route-bootstrap)
+for the full configuration.
+
+```yaml
+"@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+http_filters:
+  - name: dynamic-fault-injection
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+      dynamic_module_config:
+        name: composer
+      filter_name: dynamic-fault-injection
+      filter_config:
+        "@type": type.googleapis.com/google.protobuf.StringValue
+        value: "endpoints: []"
+  - name: envoy.filters.http.router
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+route_config:
+  virtual_hosts:
+    - name: api
+      domains: ["api.example.com"]
+      routes:
+        - match:
+            prefix: "/foo/bar/"
+            headers:
+              - name: ":method"
+                exact_match: "GET"
+          typed_per_filter_config:
+            dynamic-fault-injection:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilterPerRoute
+              dynamic_module_config:
+                name: composer
+              filter_name: dynamic-fault-injection
+              filter_config:
+                "@type": type.googleapis.com/google.protobuf.StringValue
+                value: |
+                  responses:
+                    - status: 200
+                      resolution: 100
+                      distribution:
+                        p0.0: "5ms"
+                        p100.0: "20ms"
+          route:
+            cluster: upstream_service
+```
 
 ### Percentile Keys
 
@@ -308,6 +441,80 @@ The filter adds response headers to indicate what was injected:
 |--------|-------------|
 | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.3ms") |
 | `x-fault-actual-upstream` | Actual time the upstream took to respond |
-| `x-fault-added-delay` | Additional delay injected (target - upstream, only if > 0) |
+| `x-fault-added-delay` | Additional delay injected (target - upstream), or `0s` when none was added |
 | `x-fault-injected` | Set to "abort" when a non-2xx status was injected |
 | `x-fault-status` | The status code selected by the distribution |
+
+## Appendix: Complete Per-Route Bootstrap
+
+The following full bootstrap is based on the per-route E2E test. Replace the
+listener/admin ports, the upstream address, and the dynamic module search path
+for your environment. The `ENVOY_DYNAMIC_MODULES_SEARCH_PATH` environment
+variable must contain `libcomposer.so`.
+
+```yaml
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+static_resources:
+  listeners:
+    - name: main
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                http_filters:
+                  - name: dynamic-fault-injection
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                      dynamic_module_config: { name: composer }
+                      filter_name: dynamic-fault-injection
+                      filter_config:
+                        "@type": type.googleapis.com/google.protobuf.StringValue
+                        value: "endpoints: []"
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: routes
+                  virtual_hosts:
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/anything/"
+                            headers:
+                              - name: ":method"
+                                exact_match: "GET"
+                          typed_per_filter_config:
+                            dynamic-fault-injection:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilterPerRoute
+                              dynamic_module_config: { name: composer }
+                              filter_name: dynamic-fault-injection
+                              filter_config:
+                                "@type": type.googleapis.com/google.protobuf.StringValue
+                                value: |
+                                  responses:
+                                    - status: 200
+                                      resolution: 100
+                                      distribution:
+                                        p0.0: "20ms"
+                                        p100.0: "20ms"
+                          route:
+                            cluster: upstream_service
+  clusters:
+    - name: upstream_service
+      type: STATIC
+      load_assignment:
+        cluster_name: upstream_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8080 }
+```
+

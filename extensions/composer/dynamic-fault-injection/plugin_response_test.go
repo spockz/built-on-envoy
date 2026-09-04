@@ -153,6 +153,26 @@ func TestOnResponseHeaders_ExpectedResponseNeedsNoDelay(t *testing.T) {
 	require.Equal(t, "200", headers.GetOne("x-fault-status").ToUnsafeString())
 }
 
+func TestOnResponseHeaders_UnconfiguredStatusPassesThrough(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	filter := &latencyFaultFilter{
+		handle:       handle,
+		matched:      true,
+		sample:       fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
+		requestStart: time.Now(),
+	}
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"404"}})
+
+	status := filter.OnResponseHeaders(headers, false)
+	require.Equal(t, shared.HeadersStatusContinue, status)
+	require.Equal(t, "0s", headers.GetOne("x-fault-injected-delay").ToUnsafeString())
+	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
+	require.Equal(t, "0s", headers.GetOne("x-fault-added-delay").ToUnsafeString())
+	require.Equal(t, "404", headers.GetOne("x-fault-status").ToUnsafeString())
+}
+
 type responseTestScheduler struct {
 	done chan struct{}
 }

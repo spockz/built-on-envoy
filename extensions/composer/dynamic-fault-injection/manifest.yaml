@@ -141,6 +141,21 @@ longDescription: |
 
   ### Configuration Fields
 
+  Filter-level configuration retains `endpoints[]` for launchers that cannot express Envoy route
+  configuration. When this filter is configured through Envoy's `typed_per_filter_config`, the
+  per-route value must use the direct behavior shape: `responses` or `load_based` at the top level.
+  `endpoints[]` is rejected by the per-route configuration constructor because route matching is
+  performed by Envoy.
+
+  > [!NOTE]
+  > Per-route configuration is not currently accessible through the `boe` CLI. It requires direct
+  > control of the Envoy bootstrap configuration to add `typed_per_filter_config` to a route.
+
+  If the upstream returns a status code that has no configured behavior for the selected endpoint
+  or per-route configuration, the filter passes that response through without injecting latency and
+  still sets fault metadata headers: `x-fault-injected-delay: 0s`, `x-fault-added-delay: 0s`,
+  `x-fault-status: <upstream status>`, and `x-fault-actual-upstream: <measured duration>`.
+
   | Field | Description |
   |-------|-------------|
   | `endpoints` | Array of endpoint configurations. First match wins. |
@@ -234,6 +249,6 @@ longDescription: |
   |--------|-------------|
   | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.3ms") |
   | `x-fault-actual-upstream` | Actual time the upstream took to respond |
-  | `x-fault-added-delay` | Additional delay injected (target - upstream, only if > 0) |
+  | `x-fault-added-delay` | Additional delay injected (target - upstream), or `0s` when none was added |
   | `x-fault-injected` | Set to "abort" when a non-2xx status was injected |
   | `x-fault-status` | The status code selected by the distribution |
