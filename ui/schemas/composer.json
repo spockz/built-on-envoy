@@ -2,21 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dynamic-fault-injection/config.schema.json",
   "title": "dynamic-fault-injection Configuration",
-  "description": "Configuration for the dynamic fault injection filter. Filter-level configuration may define endpoint selectors; per-route configuration defines direct response distributions or load-based behavior.",
+  "description": "Configuration for the dynamic fault injection filter. Defines endpoints with route matching, response distributions, and optional load-based behavior.",
   "type": "object",
   "additionalProperties": false,
-  "anyOf": [
-    { "required": ["endpoints"] },
-    { "required": ["responses"] },
-    { "required": ["load_based"] }
-  ],
+  "required": ["endpoints"],
   "properties": {
-    "probability_distribution": {
-      "type": "string",
-      "description": "Selects latency sampling mode for response distributions.",
-      "enum": ["stateful", "stateless"],
-      "default": "stateful"
-    },
     "endpoints": {
       "type": "array",
       "description": "List of endpoint configurations, each defining fault behavior for matched routes.",
@@ -166,17 +156,6 @@
           }
         }
       }
-    },
-    "responses": {
-      "type": "array",
-      "description": "Direct response distributions for per-route configuration.",
-      "items": {
-        "$ref": "#/properties/endpoints/items/properties/responses/items"
-      }
-    },
-    "load_based": {
-      "description": "Direct load-based behavior for per-route configuration.",
-      "$ref": "#/properties/endpoints/items/properties/load_based"
     }
   }
 }

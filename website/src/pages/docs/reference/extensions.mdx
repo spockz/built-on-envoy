@@ -2356,7 +2356,7 @@ Token exchange endpoint URL. Must contain a host and path (e.g. "https://idp.exa
 <a id="dynamic-fault-injection"></a>
 ## dynamic-fault-injection Configuration
 
-Configuration for the dynamic fault injection filter. Defines endpoints with route matching, response distributions, and optional load-based behavior.
+Configuration for the dynamic fault injection filter. Filter-level configuration may define endpoint selectors; per-route configuration defines direct response distributions or load-based behavior.
 
 ### endpoints
 
@@ -2365,7 +2365,7 @@ List of endpoint configurations, each defining fault behavior for matched routes
 | | |
 |---|---|
 | **Type** | `[]object` |
-| **Required** | Yes |
+| **Required** | No |
 
 [↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection)
 
@@ -2408,7 +2408,41 @@ Response distributions. Resolution acts as both relative weight and sample count
 
 [↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection)
 
-   {/* range .SubProperties */} {/* if .SubProperties */} {/* range .Properties */} {/* if .CustomTypes */}
+   {/* range .SubProperties */} {/* if .SubProperties */}
+
+### load_based
+
+Direct load-based behavior for per-route configuration.
+
+| | |
+|---|---|
+| **Type** | [#/properties/endpoints/items/properties/load_based](#dynamic-fault-injection-#/properties/endpoints/items/properties/load_based) |
+| **Required** | No |
+
+[↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection) {/* if .SubProperties */}
+
+### probability_distribution
+
+Selects latency sampling mode for response distributions.
+
+| | |
+|---|---|
+| **Type** | `string` |
+| **Required** | No |
+| **Allowed values** | `stateful`, `stateless` |
+
+[↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection) {/* if .SubProperties */}
+
+### responses
+
+Direct response distributions for per-route configuration.
+
+| | |
+|---|---|
+| **Type** | [[]#/properties/endpoints/items/properties/responses/items](#dynamic-fault-injection-#/properties/endpoints/items/properties/responses/items) |
+| **Required** | No |
+
+[↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection) {/* if .SubProperties */} {/* range .Properties */} {/* if .CustomTypes */}
 
 
 

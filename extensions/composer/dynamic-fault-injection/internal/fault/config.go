@@ -18,9 +18,21 @@ import (
 
 // FilterConfig is the top-level configuration for the latency/fault filter.
 type FilterConfig struct {
-	Endpoints               []EndpointConfig `yaml:"endpoints"`
-	ProbabilityDistribution string           `yaml:"probability_distribution,omitempty"`
+	Endpoints               []EndpointConfig     `yaml:"endpoints"`
+	ProbabilityDistribution string               `yaml:"probability_distribution,omitempty"`
+	Responses               []StatusDistribution `yaml:"responses,omitempty"`
+	LoadBased               *LoadBasedConfig     `yaml:"load_based,omitempty"`
 }
+
+// ConfigSource identifies where a configuration was supplied.
+type ConfigSource int
+
+const (
+	// FilterConfigSource identifies filter-level configuration.
+	FilterConfigSource ConfigSource = iota
+	// PerRouteConfigSource identifies configuration attached to an Envoy route.
+	PerRouteConfigSource
+)
 
 const (
 	// ProbabilityDistributionStateful uses StatefulProbabilityDistribution.
@@ -71,9 +83,22 @@ type GreyZoneConfig struct {
 // Accepts both YAML and JSON input. When using google.protobuf.Struct as the
 // filter_config type in Envoy, the config is received as JSON (which is valid YAML).
 func ParseConfig(data []byte) (*FilterConfig, error) {
+	return parseConfig(data, FilterConfigSource)
+}
+
+// ParsePerRouteConfig parses direct behavior configuration for an Envoy route.
+// Route matching belongs to Envoy, so endpoint selectors are not accepted.
+func ParsePerRouteConfig(data []byte) (*FilterConfig, error) {
+	return parseConfig(data, PerRouteConfigSource)
+}
+
+func parseConfig(data []byte, source ConfigSource) (*FilterConfig, error) {
 	var cfg FilterConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse filter config: %w", err)
+	}
+	if source == PerRouteConfigSource && hasTopLevelKey(data, "endpoints") {
+		return nil, fmt.Errorf("endpoints cannot be used in per-route configuration; configure matching in Envoy routes")
 	}
 
 	// Default to stateful sampling when not explicitly configured.
@@ -87,25 +112,16 @@ func ParseConfig(data []byte) (*FilterConfig, error) {
 		validationErrors = append(validationErrors, fmt.Errorf("probability_distribution must be one of %q or %q, got %q", ProbabilityDistributionStateful, ProbabilityDistributionStateless, cfg.ProbabilityDistribution))
 	}
 
+	if source == PerRouteConfigSource || len(cfg.Responses) > 0 || cfg.LoadBased != nil {
+		if err := validateBehavior(cfg.Responses, cfg.LoadBased, "configuration"); err != nil {
+			validationErrors = append(validationErrors, err)
+		}
+	}
+
 	// Validate endpoints.
 	for i, ep := range cfg.Endpoints {
-		if len(ep.Responses) == 0 && ep.LoadBased == nil {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: must have at least 'responses' or 'load_based' configured", i))
-		}
-
-		if len(ep.Responses) > 0 && ep.LoadBased != nil {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: must have *either one* 'responses' or 'load_based' configured", i))
-		}
-
-		for j, resp := range ep.Responses {
-			if err := validateStatusDistribution(resp, fmt.Sprintf("endpoint %d response %d", i, j)); err != nil {
-				validationErrors = append(validationErrors, err)
-			}
-		}
-		if ep.LoadBased != nil {
-			if err := validateLoadBased(ep.LoadBased, i); err != nil {
-				validationErrors = append(validationErrors, err)
-			}
+		if err := validateBehavior(ep.Responses, ep.LoadBased, fmt.Sprintf("endpoint %d", i)); err != nil {
+			validationErrors = append(validationErrors, err)
 		}
 	}
 
@@ -114,6 +130,44 @@ func ParseConfig(data []byte) (*FilterConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+func validateBehavior(responses []StatusDistribution, loadBased *LoadBasedConfig, context string) error {
+	validationErrors := []error{}
+	if len(responses) == 0 && loadBased == nil {
+		validationErrors = append(validationErrors, fmt.Errorf("%s: must have at least 'responses' or 'load_based' configured", context))
+	}
+	if len(responses) > 0 && loadBased != nil {
+		validationErrors = append(validationErrors, fmt.Errorf("%s: must have *either one* 'responses' or 'load_based' configured", context))
+	}
+	for j, resp := range responses {
+		if err := validateStatusDistribution(resp, fmt.Sprintf("%s response %d", context, j)); err != nil {
+			validationErrors = append(validationErrors, err)
+		}
+	}
+	if loadBased != nil {
+		if err := validateLoadBased(loadBased, context); err != nil {
+			validationErrors = append(validationErrors, err)
+		}
+	}
+	return errors.Join(validationErrors...)
+}
+
+func hasTopLevelKey(data []byte, key string) bool {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil || len(node.Content) == 0 {
+		return false
+	}
+	root := node.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 func validateStatusDistribution(sd StatusDistribution, context string) error {
@@ -133,30 +187,30 @@ func validateStatusDistribution(sd StatusDistribution, context string) error {
 	return errors.Join(validationErrors...)
 }
 
-func validateLoadBased(lb *LoadBasedConfig, endpointIdx int) error {
+func validateLoadBased(lb *LoadBasedConfig, context string) error {
 	validationErrors := []error{}
 	if lb.Healthy == nil {
-		validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: load_based.healthy is required", endpointIdx))
+		validationErrors = append(validationErrors, fmt.Errorf("%s: load_based.healthy is required", context))
 	} else if lb.Healthy.ThresholdRPS <= 0 {
-		validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: load_based.healthy.threshold_rps must be positive", endpointIdx))
+		validationErrors = append(validationErrors, fmt.Errorf("%s: load_based.healthy.threshold_rps must be positive", context))
 	}
 
 	if lb.TippingPoint == nil {
-		validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: load_based.tipping_point is required", endpointIdx))
+		validationErrors = append(validationErrors, fmt.Errorf("%s: load_based.tipping_point is required", context))
 	}
 
 	if lb.TippingPoint != nil && lb.Healthy != nil {
 
 		if lb.TippingPoint.ThresholdRPS <= lb.Healthy.ThresholdRPS {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: load_based.tipping_point.threshold_rps must be greater than healthy.threshold_rps", endpointIdx))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: load_based.tipping_point.threshold_rps must be greater than healthy.threshold_rps", context))
 		}
 		for j, resp := range lb.Healthy.Responses {
-			if err := validateStatusDistribution(resp, fmt.Sprintf("endpoint %d healthy response %d", endpointIdx, j)); err != nil {
+			if err := validateStatusDistribution(resp, fmt.Sprintf("%s healthy response %d", context, j)); err != nil {
 				validationErrors = append(validationErrors, err)
 			}
 		}
 		for j, resp := range lb.TippingPoint.Responses {
-			if err := validateStatusDistribution(resp, fmt.Sprintf("endpoint %d tipping_point response %d", endpointIdx, j)); err != nil {
+			if err := validateStatusDistribution(resp, fmt.Sprintf("%s tipping_point response %d", context, j)); err != nil {
 				validationErrors = append(validationErrors, err)
 			}
 		}
@@ -164,19 +218,19 @@ func validateLoadBased(lb *LoadBasedConfig, endpointIdx int) error {
 
 	if lb.GreyZone != nil {
 		if _, err := time.ParseDuration(lb.GreyZone.PenaltyBase); err != nil {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: grey_zone.penalty_base: %w", endpointIdx, err))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: grey_zone.penalty_base: %w", context, err))
 		}
 		if _, err := time.ParseDuration(lb.GreyZone.SpikePenaltyDuration); err != nil {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: grey_zone.spike_penalty_duration: %w", endpointIdx, err))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: grey_zone.spike_penalty_duration: %w", context, err))
 		}
 		if lb.GreyZone.SpikeThreshold <= 0 || lb.GreyZone.SpikeThreshold >= 1 {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: grey_zone.spike_threshold must be between 0 and 1 exclusive", endpointIdx))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: grey_zone.spike_threshold must be between 0 and 1 exclusive", context))
 		}
 		if lb.GreyZone.SpikePenaltyMultiplier <= 0 {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: grey_zone.spike_penalty_multiplier must be positive", endpointIdx))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: grey_zone.spike_penalty_multiplier must be positive", context))
 		}
 		if lb.GreyZone.RecoveryRate <= 0 || lb.GreyZone.RecoveryRate > 1 {
-			validationErrors = append(validationErrors, fmt.Errorf("endpoint %d: grey_zone.recovery_rate must be between 0 exclusive and 1 inclusive", endpointIdx))
+			validationErrors = append(validationErrors, fmt.Errorf("%s: grey_zone.recovery_rate must be between 0 exclusive and 1 inclusive", context))
 		}
 	}
 	return errors.Join(validationErrors...)

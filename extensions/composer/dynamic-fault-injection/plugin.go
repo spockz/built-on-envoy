@@ -28,8 +28,11 @@ type (
 	// It holds the parsed config and pre-built response distributions.
 	latencyFaultFilterFactory struct {
 		shared.EmptyHttpFilterFactory
-		config    *fault.FilterConfig
-		endpoints []endpointEntry
+		config       *fault.FilterConfig
+		endpoints    []endpointEntry
+		distribution *fault.ResponseDistribution
+		loadBased    *fault.LoadBasedResponseDistribution
+		direct       bool
 	}
 
 	// latencyFaultFilter implements [shared.HttpFilter].
@@ -58,6 +61,20 @@ func (f *latencyFaultFilterFactory) Create(handle shared.HttpFilterHandle) share
 	return &latencyFaultFilter{handle: handle, factory: factory}
 }
 
+func (f *latencyFaultFilterFactory) sample() (fault.ResponseSample, bool) {
+	if f.direct {
+		if f.distribution != nil {
+			return f.distribution.Sample(), true
+		}
+		if f.loadBased != nil {
+			// TODO: Feed actual RPS when tracking is implemented.
+			return f.loadBased.Sample(0), true
+		}
+		return fault.ResponseSample{}, false
+	}
+	return fault.ResponseSample{}, false
+}
+
 // headerMapAdapter adapts shared.HeaderMap to fault.HeaderGetter.
 type headerMapAdapter struct {
 	headers shared.HeaderMap
@@ -70,26 +87,26 @@ func (a *headerMapAdapter) GetOne(name string) string {
 // OnRequestHeaders is called when the request is flowing to the upstream.
 // We match the route, sample from the distribution, and record the start time.
 func (f *latencyFaultFilter) OnRequestHeaders(headers shared.HeaderMap, _ bool) shared.HeadersStatus {
-	path := headers.GetOne(":path").ToUnsafeString()
-
-	// Find the matching endpoint and sample.
-	adapter := &headerMapAdapter{headers: headers}
-	for i := range f.factory.endpoints {
-		ep := &f.factory.endpoints[i]
-		if !fault.MatchRoute(ep.match, path, adapter) {
-			continue
+	if sample, ok := f.factory.sample(); ok {
+		f.sample = sample
+		f.matched = true
+	} else {
+		path := headers.GetOne(":path").ToUnsafeString()
+		adapter := &headerMapAdapter{headers: headers}
+		for i := range f.factory.endpoints {
+			ep := &f.factory.endpoints[i]
+			if !fault.MatchRoute(ep.match, path, adapter) {
+				continue
+			}
+			if ep.distribution != nil {
+				f.sample = ep.distribution.Sample()
+				f.matched = true
+			} else if ep.loadBased != nil {
+				f.sample = ep.loadBased.Sample(0)
+				f.matched = true
+			}
+			break
 		}
-
-		// Matched endpoint — sample a response.
-		if ep.distribution != nil {
-			f.sample = ep.distribution.Sample()
-			f.matched = true
-		} else if ep.loadBased != nil {
-			// TODO: Feed actual RPS when tracking is implemented.
-			f.sample = ep.loadBased.Sample(0)
-			f.matched = true
-		}
-		break
 	}
 
 	// Record when the request was sent to upstream.
@@ -113,9 +130,21 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 	remainingDelay := max(f.sample.Duration-elapsed, 0)
 
 	status := headers.GetOne(":status").ToUnsafeString()
-	fmt.Println(f.sample, status)
+	upstreamStatus, err := strconv.Atoi(status)
+	if err != nil {
+		return shared.HeadersStatusContinue
+	}
+
+	// If this upstream status has no configured behavior, pass through untouched.
+	if f.sample.Status < 400 && upstreamStatus != f.sample.Status {
+		headers.Set("x-fault-injected-delay", "0s")
+		headers.Set("x-fault-actual-upstream", elapsed.String())
+		headers.Set("x-fault-added-delay", "0s")
+		headers.Set("x-fault-status", status)
+		return shared.HeadersStatusContinue
+	}
 	// If the sampled status is an "error" case and different from the upstream response rewrite the response
-	if f.sample.Status >= 400 && strconv.Itoa(f.sample.Status) != status { // not happy about the string comparison
+	if f.sample.Status >= 400 && f.sample.Status != upstreamStatus {
 		if remainingDelay > 0 {
 			// Delay, then send local error response.
 			scheduler := f.handle.GetScheduler()
@@ -195,24 +224,61 @@ func (f *CustomHttpFilterConfigFactory) Create(handle shared.HttpFilterConfigHan
 		handle.Log(shared.LogLevelError, "dynamic-fault-injection: "+err.Error())
 		return nil, err
 	}
-	handle.Log(shared.LogLevelInfo, fmt.Sprintf("dynamic-fault-injection: initialized with %d endpoints (upstream mode)", len(factory.endpoints)))
+	mode := "upstream mode"
+	if factory.direct {
+		mode = "direct mode"
+	}
+	handle.Log(shared.LogLevelInfo, fmt.Sprintf("dynamic-fault-injection: initialized in %s with %d endpoints", mode, len(factory.endpoints)))
 	return factory, nil
 }
 
 // CreatePerRoute parses per-route configuration for the dynamic-fault-injection filter.
 func (f *CustomHttpFilterConfigFactory) CreatePerRoute(unparsedConfig []byte) (any, error) {
-	return buildFilterFactory(unparsedConfig)
+	return buildFilterFactoryForSource(unparsedConfig, fault.PerRouteConfigSource)
 }
 
 // buildFilterFactory parses config and builds the filter factory with pre-computed distributions.
 func buildFilterFactory(config []byte) (*latencyFaultFilterFactory, error) {
-	cfg, err := fault.ParseConfig(config)
+	return buildFilterFactoryForSource(config, fault.FilterConfigSource)
+}
+
+func buildFilterFactoryForSource(config []byte, source fault.ConfigSource) (*latencyFaultFilterFactory, error) {
+	var cfg *fault.FilterConfig
+	var err error
+	if source == fault.PerRouteConfigSource {
+		cfg, err = fault.ParsePerRouteConfig(config)
+	} else {
+		cfg, err = fault.ParseConfig(config)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	factory := &latencyFaultFilterFactory{
 		config: cfg,
+		direct: source == fault.PerRouteConfigSource || len(cfg.Endpoints) == 0,
+	}
+	if factory.direct {
+		if len(cfg.Responses) > 0 {
+			factory.distribution, err = fault.NewResponseDistributionWithMode(cfg.Responses, cfg.ProbabilityDistribution)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build response distribution: %w", err)
+			}
+		}
+		if cfg.LoadBased != nil {
+			factory.loadBased, err = fault.NewLoadBasedResponseDistributionWithMode(
+				cfg.LoadBased.Healthy.Responses,
+				cfg.LoadBased.Healthy.ThresholdRPS,
+				cfg.LoadBased.TippingPoint.Responses,
+				cfg.LoadBased.TippingPoint.ThresholdRPS,
+				cfg.LoadBased.GreyZone,
+				cfg.ProbabilityDistribution,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build load-based distribution: %w", err)
+			}
+		}
+		return factory, nil
 	}
 
 	// Build per-endpoint distributions.

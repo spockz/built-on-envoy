@@ -44,6 +44,22 @@ func TestConfigSchema(t *testing.T) {
 			}`)
 	})
 
+	t.Run("valid direct per-route config", func(t *testing.T) {
+		internaltesting.AssertSchemaValid(t, "config.schema.json", `
+{
+  "responses": [
+    {
+      "status": 200,
+      "resolution": 100,
+      "distribution": {
+        "p0.0": "1ms",
+        "p100.0": "10ms"
+      }
+    }
+  ]
+}`)
+	})
+
 	// Tried adding the following to the schema to ensure that *either* the `responses` or the `load_based`
 	// field would be accepted and documents with both would be rejected. Sadly, it didn't appear to have
 	// any effect.
