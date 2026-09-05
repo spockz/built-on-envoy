@@ -25,7 +25,7 @@ ifneq ($(PWD),)
 	ifneq ($(CWD), $(MAKEFILE_DIR)) # check that we are in a subdirectory and not the extension directory itself
 	ifneq ($(filter $(MAKEFILE_DIR)/%,$(CWD)), )
 	ifneq ($(wildcard $(CWD)/manifest.yaml),) # Check whether manifest.yaml exists by resolves to a file which yields the path or empty string
-		EXTENSION_PATH := $(CWD)
+		EXTENSION_PATH := $(patsubst $(MAKEFILE_DIR)/%,%,$(CWD))
 	endif
 	endif
 	endif
