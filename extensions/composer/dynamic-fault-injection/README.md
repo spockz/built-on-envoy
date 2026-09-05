@@ -465,6 +465,192 @@ request-entry count assertion while keeping all requests active during the three
 The request upper bound can be overridden with
 `TEST_DYNAMIC_FAULT_INJECTION_ACTIVE_REQUEST_COUNT_UPPER_BOUND`; it defaults to 2,000.
 
+## Performance considerations
+
+The `stateful` and `stateless` probability distributions have different CPU,
+memory, and concurrency characteristics. The benchmark sources in
+`performance_bench_test.go`, `endpoint_bench_test.go`,
+`internal/fault/performance_bench_test.go`, and `performance/` reproduce the
+measurements below.
+
+Use `stateful` when CPU efficiency and exact finite-cycle duration behavior are
+important; it remains the default. Use `stateless` for high-concurrency,
+throughput-sensitive configurations where lower contention, tail latency, and
+resolution-independent memory matter more, accepting higher CPU use. Load-based
+configurations show little difference because their outer mutex dominates both
+modes.
+
+### Reproducing the analysis
+
+Run the benchmarks from the repository root with Go 1.26.6:
+
+```sh
+export GOTOOLCHAIN=go1.26.6
+export GOCACHE=/tmp/boe-gocache
+export GOLANGCI_LINT_CACHE=/tmp/boe-golangci
+
+go test -C extensions/composer ./dynamic-fault-injection/internal/fault \
+  -run '^$' \
+  -bench='BenchmarkDurationSample|BenchmarkResponseSampleParallel|BenchmarkLoadBasedSampleParallel' \
+  -benchmem -benchtime=300ms -count=3 -cpu=1,4,16
+
+go test -C extensions/composer ./dynamic-fault-injection/internal/fault \
+  -run '^$' -bench='BenchmarkDurationSampleCycle' \
+  -benchmem -benchtime=100ms -count=1 -cpu=1
+
+go test -C extensions/composer ./dynamic-fault-injection \
+  -run '^$' -bench='BenchmarkFactoryConstruction' \
+  -benchmem -benchtime=1x -count=3 -cpu=1
+
+go test -C extensions/composer ./dynamic-fault-injection \
+  -run '^$' \
+  -bench='BenchmarkDirectSampling|BenchmarkEndpointMatchedSampling|BenchmarkActiveRequestTracking|BenchmarkResponseHeaderWrites' \
+  -benchmem -benchtime=500ms -count=3 -cpu=1,4,16
+```
+
+Build the process runner to compare saturated CPU throughput and retained
+distribution memory. The `memory` form takes a mode, endpoint count, and
+resolution. Run each mode separately so the shell's `time` output can be
+recorded:
+
+```sh
+go build -C extensions/composer -o /tmp/dfi-performance \
+  ./dynamic-fault-injection/performance
+
+time /tmp/dfi-performance stateful
+time /tmp/dfi-performance stateless
+
+/tmp/dfi-performance memory stateful 1 1000000
+/tmp/dfi-performance memory stateful 20 1000000
+/tmp/dfi-performance memory stateless 1 1000000
+/tmp/dfi-performance memory stateless 20 1000000
+```
+
+The construction matrix covers resolutions from 10 through 1,000,000 and 1,
+5, 10, and 20 endpoint entries. Sampling benchmarks use fixed-response and
+load-based configurations, including grey-zone penalties. Their distributions
+are built once before the timed parallel loops, matching the filter factory
+lifecycle; the endpoint benchmark uses `/` for one endpoint and twenty specific
+prefixes for the route-scan case. The stateful cycle benchmark includes the
+reshuffle after a complete 100,000- or 1,000,000-sample cycle.
+
+To update the results below, record the median or representative values from
+the repeated benchmark output, copy the stateful/stateless `time` output and
+runner throughput, and record the retained heap values from the four `memory`
+invocations. Keep the machine, architecture, Go version, benchmark flags, and
+any changed configuration with the updated results so future runs remain
+comparable. Validate the benchmark files from this extension directory with:
+
+```sh
+cd extensions/composer/dynamic-fault-injection
+GOTOOLCHAIN=go1.26.6 GOCACHE=/tmp/boe-gocache \
+  GOLANGCI_LINT_CACHE=/tmp/boe-golangci make -C ../.. format lint
+```
+
+### Results
+
+The measurements were run on Linux/amd64 on an AMD Ryzen 9 5900X with Go 1.26.6.
+
+For a two-status fixed response distribution at resolution 1,000 with five
+percentile boundaries, fixed response sampling was:
+
+| GOMAXPROCS | Stateful | Stateless |
+|---:|---:|---:|
+| 1 | about 250 ns/op, 95 B, 5 allocs | about 270 ns/op, 104 B, 7 allocs |
+| 16 | about 210 ns/op, 95 B, 5 allocs | about 65 ns/op, 104 B, 7 allocs |
+
+Duration-only sampling at 16-way parallelism was about 124 ns/op for stateful
+and 28 ns/op for stateless. At one worker, stateful was about 116 ns/op and
+stateless was about 124 ns/op for five percentile boundaries. Stateful timing
+includes periodic reshuffle costs amortized over each resolution cycle. The
+full-cycle benchmark reached 100,000 and 1,000,000 resolutions: one million
+samples took about 114 ms stateful and 126 ms stateless, so a complete stateful
+cycle is only modestly faster once its crypto shuffle is included.
+
+Load-based sampling showed almost no mode difference because
+`LoadBasedResponseDistribution.mu` covers tier selection, grey-zone calculations,
+status selection, and duration sampling:
+
+| Branch, 16-way parallelism | Stateful | Stateless |
+|---|---:|---:|
+| Healthy | about 260 ns/op | about 268 ns/op |
+| Grey zone | about 372 ns/op | about 386 ns/op |
+| Grey zone with penalty | about 420 ns/op | about 425 ns/op |
+| Tipping point | about 253 ns/op | about 268 ns/op |
+
+The endpoint benchmark matched the last entry, so twenty entries also paid the
+linear route scan:
+
+| Workload, 16-way parallelism | Stateful | Stateless |
+|---|---:|---:|
+| One matched endpoint | about 212 ns/op | about 61 ns/op |
+| Twenty specific endpoints | about 246 ns/op | about 68 ns/op |
+
+The direct factory path was about 210 ns/op stateful versus 60 ns/op stateless
+at 16-way parallelism. This is consistent with the endpoint result: the mode
+difference comes from the shared distribution rather than route matching.
+
+Stateful construction grows with resolution and endpoint count. With one status
+entry per endpoint, resolution 1,000,000 took about 117 ms and allocated 56 MB
+for one endpoint; twenty endpoints took about 2.2 s and allocated 1.12 GB in
+total. The retained-memory runner, which uses two status entries per endpoint,
+measured 8.8 MB retained heap for one endpoint and 176 MB for twenty endpoints.
+Stateless retained about 6 KB in either case and its construction stayed roughly
+constant with resolution. These retained-heap values cover the response
+distribution objects and their sample tables; parsed configuration and endpoint
+matching objects are outside that runner.
+
+The active-request counter measured about 0.8 ns for a load-only operation and
+3.2 ns for load plus increment/decrement serially. Under parallel contention,
+the entry/exit sequence measured about 25 ns at four workers and 28 ns at
+sixteen workers. Diagnostic response-header writes added about 45 ns, 16 bytes,
+and one allocation to a five-header response in the fake HeaderMap benchmark.
+
+The process runner used 16 goroutines, a shared two-status response distribution,
+and resolution 1,000 for three seconds. Stateful produced about 4.81 million
+samples/s with 4.07 s user CPU and 0.18 s system CPU. Stateless produced about
+16.08 million samples/s with 37.21 s user CPU and 1.46 s system CPU. This is a
+sampler throughput and CPU comparison, not an Envoy request-latency measurement.
+The throughput gain therefore costs roughly nine times as much aggregate user
+CPU in this saturated runner.
+
+### Interpretation
+
+`ResponseDistribution.Sample` uses crypto-random status selection in both modes.
+Stateless adds crypto-random duration selection and percentile interpolation.
+Stateful avoids that per-sample duration work, but every sample takes the shared
+duration mutex. At low concurrency, stateful is slightly faster and uses fewer
+allocations. At higher concurrency, accesses to a shared stateful sampler queue
+behind that mutex, while stateless sampling scales across workers. Increasing
+resolution changes how often reshuffling occurs, but does not remove the
+per-request mutex or resident table memory.
+
+The stateful distribution is not rebuilt per request. `Create` allocates a
+per-stream filter containing the existing factory, while distributions are built
+in `buildFilterFactory`. The endpoint benchmark constructs one factory outside
+the timed loop and samples its shared distributions from parallel workers.
+
+The active-request counter is not the primary performance risk. Diagnostic mode
+has a measurable but small response-header cost. Load-based behavior is a
+separate case because its outer mutex masks most of the stateful/stateless
+difference.
+
+`stateless` is the stronger choice for high-concurrency throughput and tail
+latency: it avoids a cross-worker serialization point and avoids
+resolution-proportional resident memory and startup work. It also consumes much
+more CPU in the saturated runner because every request performs crypto-random
+duration sampling and interpolation. `stateful` remains the better choice when
+CPU efficiency and exact finite-cycle duration behavior are important. The
+measurements therefore do not justify changing the public default on performance
+alone; keep `stateful` as the default and document `stateless` for
+throughput-sensitive configurations. No production change is applied by this
+analysis.
+
+Full Envoy HTTP latency and tail-latency measurements were intentionally omitted
+after the scope was narrowed to Go-level CPU, memory, allocation, startup, and
+contention measurements. The sampler results identify a credible tail-latency
+risk from stateful queueing at high concurrency, but do not quantify HTTP p99.
+
 ## Appendix: Complete Per-Route Bootstrap
 
 The following full bootstrap is based on the per-route E2E test. Replace the
