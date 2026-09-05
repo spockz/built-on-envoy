@@ -40,7 +40,8 @@ func TestConfigSchema(t *testing.T) {
 				          }
 				        }
 				      ]
-					}]
+					}],
+					"diagnostic": true
 			}`)
 	})
 

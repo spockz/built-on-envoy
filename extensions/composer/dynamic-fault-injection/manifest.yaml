@@ -170,6 +170,7 @@ longDescription: |
   | `endpoints[].load_based.healthy` | Behavior below the healthy RPS threshold |
   | `endpoints[].load_based.tipping_point` | Behavior above the tipping point RPS |
   | `endpoints[].load_based.grey_zone` | Transition parameters between healthy and tipping |
+  | `diagnostic` | Include the diagnostic `x-fault-worker-index` response header; defaults to `false` |
 
   ### Percentile Keys
 
@@ -224,10 +225,7 @@ longDescription: |
 
   ### Load-Based Behavior
 
-  > [!IMPORTANT]
-  > As of yet the load-based behaviour needs to be implemented still.
-
-  When `load_based` is configured:
+  When `load_based` is configured, the process-global active-request count is passed as the current load value:
   - Below `healthy.threshold_rps`: Uses the healthy response distribution
   - Above `tipping_point.threshold_rps`: Uses the tipping point distribution
   - Between the two (**grey zone**): Probabilistically mixes between healthy and tipping based on position, with optional penalty
@@ -250,5 +248,7 @@ longDescription: |
   | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.3ms") |
   | `x-fault-actual-upstream` | Actual time the upstream took to respond |
   | `x-fault-added-delay` | Additional delay injected (target - upstream), or `0s` when none was added |
+  | `x-fault-requests-in-flight` | Process-global in-flight matched request count observed at request entry, before the request is added |
+  | `x-fault-worker-index` | Envoy worker index that made the fault decision; only included when `diagnostic` is `true` |
   | `x-fault-injected` | Set to "abort" when a non-2xx status was injected |
   | `x-fault-status` | The status code selected by the distribution |

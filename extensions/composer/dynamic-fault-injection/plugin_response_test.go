@@ -44,6 +44,8 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	activeRequests.Store(99)
+	t.Cleanup(func() { activeRequests.Store(0) })
 	scheduler := newResponseTestScheduler()
 	handle.EXPECT().GetScheduler().Return(scheduler)
 
@@ -58,10 +60,11 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	})
 
 	filter := &latencyFaultFilter{
-		handle:       handle,
-		matched:      true,
-		sample:       fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond},
-		requestStart: time.Now(),
+		handle:               handle,
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond},
+		requestEntryInFlight: 7,
+		requestStart:         time.Now(),
 	}
 	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
 
@@ -74,12 +77,15 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-actual-upstream")
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-added-delay")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-status", "503")
+	requireResponseHeader(t, localResponseHeaders, requestsInFlightHeader, "7")
 }
 
 func TestOnResponseHeaders_ImmediateAbort(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	activeRequests.Store(99)
+	t.Cleanup(func() { activeRequests.Store(0) })
 
 	var localResponseHeaders [][2]string
 	handle.EXPECT().SendLocalResponse(
@@ -92,10 +98,11 @@ func TestOnResponseHeaders_ImmediateAbort(t *testing.T) {
 	})
 
 	filter := &latencyFaultFilter{
-		handle:       handle,
-		matched:      true,
-		sample:       fault.ResponseSample{Status: 500, Duration: time.Millisecond},
-		requestStart: time.Now().Add(-10 * time.Millisecond),
+		handle:               handle,
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 500, Duration: time.Millisecond},
+		requestEntryInFlight: 8,
+		requestStart:         time.Now().Add(-10 * time.Millisecond),
 	}
 	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
 
@@ -106,21 +113,25 @@ func TestOnResponseHeaders_ImmediateAbort(t *testing.T) {
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-actual-upstream")
 	requireResponseHeaderMissing(t, localResponseHeaders, "x-fault-added-delay")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-status", "500")
+	requireResponseHeader(t, localResponseHeaders, requestsInFlightHeader, "8")
 }
 
 func TestOnResponseHeaders_DelaysExpectedResponse(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	activeRequests.Store(99)
+	t.Cleanup(func() { activeRequests.Store(0) })
 	scheduler := newResponseTestScheduler()
 	handle.EXPECT().GetScheduler().Return(scheduler)
 	handle.EXPECT().ContinueResponse()
 
 	filter := &latencyFaultFilter{
-		handle:       handle,
-		matched:      true,
-		sample:       fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
-		requestStart: time.Now(),
+		handle:               handle,
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
+		requestEntryInFlight: 9,
+		requestStart:         time.Now(),
 	}
 	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
 
@@ -130,6 +141,7 @@ func TestOnResponseHeaders_DelaysExpectedResponse(t *testing.T) {
 	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
 	require.NotEmpty(t, headers.GetOne("x-fault-added-delay").ToUnsafeString())
 	require.Equal(t, "200", headers.GetOne("x-fault-status").ToUnsafeString())
+	require.Equal(t, "9", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 	scheduler.Wait(t)
 }
 
@@ -137,12 +149,17 @@ func TestOnResponseHeaders_ExpectedResponseNeedsNoDelay(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	activeRequests.Store(0)
+	t.Cleanup(func() { activeRequests.Store(0) })
 	filter := &latencyFaultFilter{
-		handle:       handle,
-		matched:      true,
-		sample:       fault.ResponseSample{Status: 200, Duration: time.Millisecond},
-		requestStart: time.Now().Add(-10 * time.Millisecond),
+		handle:               handle,
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond},
+		requestEntryInFlight: 4,
+		requestStart:         time.Now().Add(-10 * time.Millisecond),
 	}
+	filter.startRequest()
+	t.Cleanup(filter.OnStreamComplete)
 	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
 
 	status := filter.OnResponseHeaders(headers, false)
@@ -151,17 +168,21 @@ func TestOnResponseHeaders_ExpectedResponseNeedsNoDelay(t *testing.T) {
 	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
 	require.Empty(t, headers.GetOne("x-fault-added-delay").ToUnsafeString())
 	require.Equal(t, "200", headers.GetOne("x-fault-status").ToUnsafeString())
+	require.Equal(t, "4", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 }
 
 func TestOnResponseHeaders_UnconfiguredStatusPassesThrough(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	activeRequests.Store(99)
+	t.Cleanup(func() { activeRequests.Store(0) })
 	filter := &latencyFaultFilter{
-		handle:       handle,
-		matched:      true,
-		sample:       fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
-		requestStart: time.Now(),
+		handle:               handle,
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
+		requestEntryInFlight: 6,
+		requestStart:         time.Now(),
 	}
 	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"404"}})
 
@@ -171,6 +192,50 @@ func TestOnResponseHeaders_UnconfiguredStatusPassesThrough(t *testing.T) {
 	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
 	require.Equal(t, "0s", headers.GetOne("x-fault-added-delay").ToUnsafeString())
 	require.Equal(t, "404", headers.GetOne("x-fault-status").ToUnsafeString())
+	require.Equal(t, "6", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
+}
+
+func TestOnResponseHeaders_DiagnosticIncludesWorkerIndex(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	handle.EXPECT().GetWorkerIndex().Return(uint32(3))
+
+	filter := &latencyFaultFilter{
+		handle:               handle,
+		factory:              &latencyFaultFilterFactory{config: &fault.FilterConfig{Diagnostic: true}},
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond},
+		requestEntryInFlight: 5,
+		requestStart:         time.Now().Add(-10 * time.Millisecond),
+	}
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
+
+	status := filter.OnResponseHeaders(headers, false)
+	require.Equal(t, shared.HeadersStatusContinue, status)
+	require.Equal(t, "3", headers.GetOne(workerIndexHeader).ToUnsafeString())
+	require.Empty(t, headers.GetOne("x-fault-request-sequence").ToUnsafeString())
+}
+
+func TestOnResponseHeaders_NonDiagnosticOmitsWorkerIndex(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+
+	filter := &latencyFaultFilter{
+		handle:               handle,
+		factory:              &latencyFaultFilterFactory{config: &fault.FilterConfig{}},
+		matched:              true,
+		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond},
+		requestEntryInFlight: 10,
+		requestStart:         time.Now().Add(-10 * time.Millisecond),
+	}
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
+
+	status := filter.OnResponseHeaders(headers, false)
+	require.Equal(t, shared.HeadersStatusContinue, status)
+	require.Empty(t, headers.GetOne(workerIndexHeader).ToUnsafeString())
+	require.Empty(t, headers.GetOne("x-fault-request-sequence").ToUnsafeString())
 }
 
 type responseTestScheduler struct {

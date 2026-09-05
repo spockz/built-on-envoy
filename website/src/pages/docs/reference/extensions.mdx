@@ -2358,6 +2358,17 @@ Token exchange endpoint URL. Must contain a host and path (e.g. "https://idp.exa
 
 Configuration for the dynamic fault injection filter. Filter-level configuration may define endpoint selectors; per-route configuration defines direct response distributions or load-based behavior.
 
+### diagnostic
+
+Includes the Envoy worker index diagnostic response header.
+
+| | |
+|---|---|
+| **Type** | `boolean` |
+| **Required** | No |
+
+[↑ Top](#) | [↑ dynamic-fault-injection Configuration](#dynamic-fault-injection) {/* if .SubProperties */}
+
 ### endpoints
 
 List of endpoint configurations, each defining fault behavior for matched routes.

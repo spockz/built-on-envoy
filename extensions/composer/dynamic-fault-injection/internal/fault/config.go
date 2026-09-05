@@ -20,6 +20,7 @@ import (
 type FilterConfig struct {
 	Endpoints               []EndpointConfig     `yaml:"endpoints"`
 	ProbabilityDistribution string               `yaml:"probability_distribution,omitempty"`
+	Diagnostic              bool                 `yaml:"diagnostic,omitempty"`
 	Responses               []StatusDistribution `yaml:"responses,omitempty"`
 	LoadBased               *LoadBasedConfig     `yaml:"load_based,omitempty"`
 }

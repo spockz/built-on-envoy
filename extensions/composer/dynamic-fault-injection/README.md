@@ -181,6 +181,7 @@ Please find an overview of the possible fields below, followed by an actual exam
 | `endpoints[].load_based.healthy` | Behavior below the healthy RPS threshold |
 | `endpoints[].load_based.tipping_point` | Behavior above the tipping point RPS |
 | `endpoints[].load_based.grey_zone` | Transition parameters between healthy and tipping |
+| `diagnostic` | Include the diagnostic `x-fault-worker-index` response header; defaults to `false` |
 
 ### Matching a Virtual Host, Method, and Path Template
 
@@ -393,6 +394,12 @@ Unlike a traditional downstream HTTP filter that injects delay *before* the requ
 
 This means the client observes a total latency that matches the configured distribution, regardless of how fast or slow the actual upstream is.
 
+For matched requests, the filter reads a process-global, atomically synchronized in-flight request
+counter when request headers are processed and uses that request-entry value for load-based
+sampling and response metadata. It then increments the counter. The counter is decremented when
+the stream completes, with filter destruction as an idempotent cleanup fallback. Envoy runs its
+workers as threads in one process, so the counter is shared across workers.
+
 ### Status Code Selection
 
 Each endpoint has one or more response entries with a `resolution` that serves as both:
@@ -415,11 +422,8 @@ The stateful probability distribution is inspired by [distribution-calculator](h
 
 ### Load-Based Behavior
 
-[!IMPORTANT]
-As of yet the load-based behaviour needs to be implemented still.
-
-
-When `load_based` is configured:
+When `load_based` is configured, the process-global active-request count is
+passed as the current load value:
 - Below `healthy.threshold_rps`: Uses the healthy response distribution
 - Above `tipping_point.threshold_rps`: Uses the tipping point distribution
 - Between the two (**grey zone**): Probabilistically mixes between healthy and tipping based on position, with optional penalty
@@ -442,8 +446,24 @@ The filter adds response headers to indicate what was injected:
 | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.3ms") |
 | `x-fault-actual-upstream` | Actual time the upstream took to respond |
 | `x-fault-added-delay` | Additional delay injected (target - upstream), or `0s` when none was added |
+| `x-fault-requests-in-flight` | Process-global in-flight matched request count observed at request entry, before the request is added |
+| `x-fault-worker-index` | Envoy worker index that made the fault decision; only included when `diagnostic` is `true` |
 | `x-fault-injected` | Set to "abort" when a non-2xx status was injected |
 | `x-fault-status` | The status code selected by the distribution |
+
+### Multi-worker active request test
+
+The E2E test in `extensions/tests/e2e/dynamic_fault_injection_test.go` starts Envoy with
+the `--concurrency 4` startup option, which creates four worker threads. It admits requests one at a
+time through a held upstream gate while the filter holds every response for three seconds. Diagnostic
+mode is enabled so the test can verify that requests reach at least two workers. The sorted request-entry
+counts must contain exactly `0..N-1`, proving that requests handled by different workers observe the same
+global counter before their own registration.
+
+The scaled variant sends 2,000 requests to the fast `/status/200` endpoint and applies the same exact
+request-entry count assertion while keeping all requests active during the three-second response hold.
+The request upper bound can be overridden with
+`TEST_DYNAMIC_FAULT_INJECTION_ACTIVE_REQUEST_COUNT_UPPER_BOUND`; it defaults to 2,000.
 
 ## Appendix: Complete Per-Route Bootstrap
 
@@ -517,4 +537,3 @@ static_resources:
                   address:
                     socket_address: { address: 127.0.0.1, port_value: 8080 }
 ```
-
