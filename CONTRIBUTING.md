@@ -65,6 +65,7 @@ All of the following are required:
 
 When contributing to the CLI or website, please run `make -C cli check` locally before opening a PR and ensure that it passes.
 When contributing to an extension, please run `make -C ../ check` (for extensions outside composer) or `make -C ../.. check` (for extensions inside composer) locally before opening a PR and ensure that it passes.
+For a complete repository check, run `make -k -j"$(nproc)" check` from the repository root. This runs independent extension checks in parallel, continues after failures, and reports an overall failure if any check fails.
 If anything goes wrong, please do not open a PR or at least mark it as a draft PR. This is helpful to save time for the reviewers.
 
 ### Write Tests
