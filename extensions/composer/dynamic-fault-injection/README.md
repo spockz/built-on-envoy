@@ -508,22 +508,30 @@ go test -C extensions/composer ./dynamic-fault-injection \
   -benchmem -benchtime=500ms -count=3 -cpu=1,4,16
 ```
 
-Build the process runner to compare saturated CPU throughput and retained
+Build the test-only runner to compare saturated CPU throughput and retained
 distribution memory. The `memory` form takes a mode, endpoint count, and
-resolution. Run each mode separately so the shell's `time` output can be
-recorded:
+resolution through environment variables. Run each mode separately so the
+shell's `time` output can be recorded:
 
 ```sh
-go build -C extensions/composer -o /tmp/dfi-performance \
+go test -C extensions/composer -c -o /tmp/dfi-performance.test \
   ./dynamic-fault-injection/performance
 
-time /tmp/dfi-performance stateful
-time /tmp/dfi-performance stateless
+DFI_PERFORMANCE_MODE=stateful time /tmp/dfi-performance.test -test.run '^$'
+DFI_PERFORMANCE_MODE=stateless time /tmp/dfi-performance.test -test.run '^$'
 
-/tmp/dfi-performance memory stateful 1 1000000
-/tmp/dfi-performance memory stateful 20 1000000
-/tmp/dfi-performance memory stateless 1 1000000
-/tmp/dfi-performance memory stateless 20 1000000
+DFI_PERFORMANCE_MODE=memory DFI_PERFORMANCE_DISTRIBUTION=stateful \
+  DFI_PERFORMANCE_ENDPOINTS=1 DFI_PERFORMANCE_RESOLUTION=1000000 \
+  /tmp/dfi-performance.test -test.run '^$'
+DFI_PERFORMANCE_MODE=memory DFI_PERFORMANCE_DISTRIBUTION=stateful \
+  DFI_PERFORMANCE_ENDPOINTS=20 DFI_PERFORMANCE_RESOLUTION=1000000 \
+  /tmp/dfi-performance.test -test.run '^$'
+DFI_PERFORMANCE_MODE=memory DFI_PERFORMANCE_DISTRIBUTION=stateless \
+  DFI_PERFORMANCE_ENDPOINTS=1 DFI_PERFORMANCE_RESOLUTION=1000000 \
+  /tmp/dfi-performance.test -test.run '^$'
+DFI_PERFORMANCE_MODE=memory DFI_PERFORMANCE_DISTRIBUTION=stateless \
+  DFI_PERFORMANCE_ENDPOINTS=20 DFI_PERFORMANCE_RESOLUTION=1000000 \
+  /tmp/dfi-performance.test -test.run '^$'
 ```
 
 The construction matrix covers resolutions from 10 through 1,000,000 and 1,
@@ -544,7 +552,8 @@ comparable. Validate the benchmark files from this extension directory with:
 ```sh
 cd extensions/composer/dynamic-fault-injection
 GOTOOLCHAIN=go1.26.6 GOCACHE=/tmp/boe-gocache \
-  GOLANGCI_LINT_CACHE=/tmp/boe-golangci make -C ../.. format lint
+  GOLANGCI_LINT_CACHE=/tmp/boe-golangci \
+  make -C ../.. EXTENSION_PATH=composer/dynamic-fault-injection format-go lint-go
 ```
 
 ### Results
