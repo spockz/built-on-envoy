@@ -9,12 +9,25 @@ package impl
 import (
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared"
 
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
+
+const (
+	requestsInFlightHeader = "x-fault-requests-in-flight"
+	addedDelayHeader       = "x-fault-added-delay"
+	actualUpstreamHeader   = "x-fault-actual-upstream"
+	injectedDelayHeader    = "x-fault-injected-delay"
+	injectedHeader         = "x-fault-injected"
+	statusHeader           = "x-fault-status"
+	workerIndexHeader      = "x-fault-worker-index"
+)
+
+var activeRequests atomic.Int64
 
 type (
 	// endpointEntry holds a compiled endpoint with its response distribution.
@@ -44,9 +57,11 @@ type (
 		factory *latencyFaultFilterFactory
 
 		// Populated during OnRequestHeaders.
-		sample       fault.ResponseSample
-		matched      bool
-		requestStart time.Time
+		sample               fault.ResponseSample
+		matched              bool
+		counted              bool
+		requestEntryInFlight int64
+		requestStart         time.Time
 
 		shared.EmptyHttpFilter
 	}
@@ -61,14 +76,13 @@ func (f *latencyFaultFilterFactory) Create(handle shared.HttpFilterHandle) share
 	return &latencyFaultFilter{handle: handle, factory: factory}
 }
 
-func (f *latencyFaultFilterFactory) sample() (fault.ResponseSample, bool) {
+func (f *latencyFaultFilterFactory) sample(loadValue int64) (fault.ResponseSample, bool) {
 	if f.direct {
 		if f.distribution != nil {
 			return f.distribution.Sample(), true
 		}
 		if f.loadBased != nil {
-			// TODO: Feed actual RPS when tracking is implemented.
-			return f.loadBased.Sample(0), true
+			return f.loadBased.Sample(float64(loadValue)), true
 		}
 		return fault.ResponseSample{}, false
 	}
@@ -87,7 +101,8 @@ func (a *headerMapAdapter) GetOne(name string) string {
 // OnRequestHeaders is called when the request is flowing to the upstream.
 // We match the route, sample from the distribution, and record the start time.
 func (f *latencyFaultFilter) OnRequestHeaders(headers shared.HeaderMap, _ bool) shared.HeadersStatus {
-	if sample, ok := f.factory.sample(); ok {
+	loadValue := activeRequests.Load()
+	if sample, ok := f.factory.sample(loadValue); ok {
 		f.sample = sample
 		f.matched = true
 	} else {
@@ -102,7 +117,7 @@ func (f *latencyFaultFilter) OnRequestHeaders(headers shared.HeaderMap, _ bool) 
 				f.sample = ep.distribution.Sample()
 				f.matched = true
 			} else if ep.loadBased != nil {
-				f.sample = ep.loadBased.Sample(0)
+				f.sample = ep.loadBased.Sample(float64(loadValue))
 				f.matched = true
 			}
 			break
@@ -111,7 +126,9 @@ func (f *latencyFaultFilter) OnRequestHeaders(headers shared.HeaderMap, _ bool) 
 
 	// Record when the request was sent to upstream.
 	if f.matched {
+		f.requestEntryInFlight = loadValue
 		f.requestStart = time.Now()
+		f.startRequest()
 	}
 
 	// Always let the request proceed to the upstream.
@@ -134,13 +151,16 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 	if err != nil {
 		return shared.HeadersStatusContinue
 	}
+	requestEntryInFlight := strconv.FormatInt(f.requestEntryInFlight, 10)
 
 	// If this upstream status has no configured behavior, pass through untouched.
 	if f.sample.Status < 400 && upstreamStatus != f.sample.Status {
-		headers.Set("x-fault-injected-delay", "0s")
-		headers.Set("x-fault-actual-upstream", elapsed.String())
-		headers.Set("x-fault-added-delay", "0s")
-		headers.Set("x-fault-status", status)
+		headers.Set(injectedDelayHeader, "0s")
+		headers.Set(actualUpstreamHeader, elapsed.String())
+		headers.Set(addedDelayHeader, "0s")
+		headers.Set(statusHeader, status)
+		headers.Set(requestsInFlightHeader, requestEntryInFlight)
+		f.setDiagnosticHeaders(headers)
 		return shared.HeadersStatusContinue
 	}
 	// If the sampled status is an "error" case and different from the upstream response rewrite the response
@@ -150,19 +170,22 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 			scheduler := f.handle.GetScheduler()
 			sample := f.sample
 			totalDuration := f.sample.Duration
+			responseHeaders := [][2]string{
+				{"Content-Type", "text/plain"},
+				{injectedHeader, "abort"},
+				{injectedDelayHeader, totalDuration.String()},
+				{actualUpstreamHeader, elapsed.String()},
+				{addedDelayHeader, remainingDelay.String()},
+				{statusHeader, fmt.Sprintf("%d", sample.Status)},
+				{requestsInFlightHeader, requestEntryInFlight},
+			}
+			responseHeaders = f.withDiagnosticHeaders(responseHeaders)
 			go func() {
 				time.Sleep(remainingDelay)
 				scheduler.Schedule(func() {
 					f.handle.SendLocalResponse(
 						uint32(sample.Status), //nolint:gosec // Status is validated to be 100-599 by ParseConfig
-						[][2]string{
-							{"Content-Type", "text/plain"},
-							{"x-fault-injected", "abort"},
-							{"x-fault-injected-delay", totalDuration.String()},
-							{"x-fault-actual-upstream", elapsed.String()},
-							{"x-fault-added-delay", remainingDelay.String()},
-							{"x-fault-status", fmt.Sprintf("%d", sample.Status)},
-						},
+						responseHeaders,
 						[]byte(fmt.Sprintf("fault filter abort: %d\n", sample.Status)),
 						"fault_abort",
 					)
@@ -172,15 +195,18 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 		}
 
 		// No remaining delay needed — immediate abort.
+		responseHeaders := [][2]string{
+			{"Content-Type", "text/plain"},
+			{injectedHeader, "abort"},
+			{injectedDelayHeader, f.sample.Duration.String()},
+			{actualUpstreamHeader, elapsed.String()},
+			{statusHeader, fmt.Sprintf("%d", f.sample.Status)},
+			{requestsInFlightHeader, requestEntryInFlight},
+		}
+		responseHeaders = f.withDiagnosticHeaders(responseHeaders)
 		f.handle.SendLocalResponse(
 			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 100-599 by ParseConfig
-			[][2]string{
-				{"Content-Type", "text/plain"},
-				{"x-fault-injected", "abort"},
-				{"x-fault-injected-delay", f.sample.Duration.String()},
-				{"x-fault-actual-upstream", elapsed.String()},
-				{"x-fault-status", fmt.Sprintf("%d", f.sample.Status)},
-			},
+			responseHeaders,
 			[]byte(fmt.Sprintf("fault filter abort: %d\n", f.sample.Status)),
 			"fault_abort",
 		)
@@ -188,11 +214,13 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 	}
 
 	// For all expected status codes: add metadata headers and delay if needed.
-	headers.Set("x-fault-injected-delay", f.sample.Duration.String())
-	headers.Set("x-fault-actual-upstream", elapsed.String())
-	headers.Set("x-fault-status", fmt.Sprintf("%d", f.sample.Status))
+	headers.Set(injectedDelayHeader, f.sample.Duration.String())
+	headers.Set(actualUpstreamHeader, elapsed.String())
+	headers.Set(statusHeader, fmt.Sprintf("%d", f.sample.Status))
+	headers.Set(requestsInFlightHeader, requestEntryInFlight)
+	f.setDiagnosticHeaders(headers)
 	if remainingDelay > 0 {
-		headers.Set("x-fault-added-delay", remainingDelay.String())
+		headers.Set(addedDelayHeader, remainingDelay.String())
 	}
 
 	// Is it worth saving the additional schedule in the case `remainingDelay == 0`?
@@ -210,6 +238,51 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 
 	// Upstream was already slow enough — no additional delay needed.
 	return shared.HeadersStatusContinue
+}
+
+func (f *latencyFaultFilter) setDiagnosticHeaders(headers shared.HeaderMap) {
+	if !f.diagnostic() {
+		return
+	}
+	headers.Set(workerIndexHeader, strconv.FormatUint(uint64(f.handle.GetWorkerIndex()), 10))
+}
+
+func (f *latencyFaultFilter) withDiagnosticHeaders(headers [][2]string) [][2]string {
+	if !f.diagnostic() {
+		return headers
+	}
+	return append(headers, [2]string{workerIndexHeader, strconv.FormatUint(uint64(f.handle.GetWorkerIndex()), 10)})
+}
+
+func (f *latencyFaultFilter) diagnostic() bool {
+	return f.factory != nil && f.factory.config != nil && f.factory.config.Diagnostic
+}
+
+// OnStreamComplete releases the request from the global in-flight count.
+func (f *latencyFaultFilter) OnStreamComplete() {
+	f.releaseRequest()
+}
+
+// OnDestroy releases the request if Envoy destroys the filter without first
+// calling OnStreamComplete.
+func (f *latencyFaultFilter) OnDestroy() {
+	f.releaseRequest()
+}
+
+func (f *latencyFaultFilter) releaseRequest() {
+	if !f.counted {
+		return
+	}
+	f.counted = false
+	activeRequests.Add(-1)
+}
+
+func (f *latencyFaultFilter) startRequest() {
+	if f.counted {
+		return
+	}
+	f.counted = true
+	activeRequests.Add(1)
 }
 
 // CustomHttpFilterConfigFactory is the configuration factory for the HTTP filter.

@@ -18,7 +18,7 @@ import (
 // RunEnvoyYAML starts Envoy from a complete bootstrap YAML document. Environment
 // variables are applied only for the lifetime of the test and Envoy is stopped
 // during cleanup.
-func RunEnvoyYAML(t *testing.T, listenPort, adminPort int, config string, env map[string]string) {
+func RunEnvoyYAML(t *testing.T, listenPort, adminPort int, config string, env map[string]string, envoyArgs ...string) {
 	t.Helper()
 	t.Logf("Starting Envoy from bootstrap YAML on listener port %d", listenPort)
 
@@ -31,11 +31,12 @@ func RunEnvoyYAML(t *testing.T, listenPort, adminPort int, config string, env ma
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- funce.Run(ctx, []string{
+		args := append([]string{
 			"--config-yaml", config,
 			"--log-level", "error",
 			"--use-dynamic-base-id",
-		}, api.StateHome(logDir), api.RuntimeDir(logDir), api.Out(buffers[0]), api.EnvoyOut(buffers[0]), api.EnvoyErr(buffers[1]))
+		}, envoyArgs...)
+		done <- funce.Run(ctx, args, api.StateHome(logDir), api.RuntimeDir(logDir), api.Out(buffers[0]), api.EnvoyOut(buffers[0]), api.EnvoyErr(buffers[1]))
 	}()
 
 	t.Cleanup(func() {

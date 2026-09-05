@@ -10,10 +10,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +25,13 @@ import (
 	internaltesting "github.com/tetratelabs/built-on-envoy/internal/testing"
 )
 
-func TestDistributionDelay(t *testing.T) {
+var dynamicFaultInjectionActiveRequestCountUpperBound = internaltesting.NewEnvVar(
+	"TEST_DYNAMIC_FAULT_INJECTION_ACTIVE_REQUEST_COUNT_UPPER_BOUND",
+	"Upper bound for the scaled active request count E2E test",
+	2000,
+)
+
+func TestDynamicFaultInjectionDistributionDelay(t *testing.T) {
 	minimalDelay := millis(20)
 	maximalDelay := millis(300)
 	config := fmt.Sprintf(`{
@@ -46,7 +55,7 @@ func TestDistributionDelay(t *testing.T) {
 	]
 }`, minimalDelay.Milliseconds(), maximalDelay.Milliseconds())
 	fmt.Printf("Using config: %s\n", config)
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Requests to /delay have distribution: p0=20ms, p50=50ms, p90=100ms, p99=200ms, p100=300ms.
 	var durations []time.Duration
@@ -115,7 +124,7 @@ func TestDistributionDelay(t *testing.T) {
 		"average delay should be meaningful (got %v)", avgDelay)
 }
 
-func TestDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.T) {
+func TestDynamicFaultInjectionDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.T) {
 	config := `{
   "responses": [
     {
@@ -125,7 +134,7 @@ func TestDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.
     }
   ]
 }`
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/direct", proxyPort), nil)
 	require.NoError(t, err)
 
@@ -141,7 +150,176 @@ func TestDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.
 	})
 }
 
-func TestPerRouteConfiguration(t *testing.T) {
+func TestDynamicFaultInjectionGlobalActiveRequestCountAcrossWorkers(t *testing.T) {
+	testDynamicFaultInjectionGlobalActiveRequestCount(t, "/status/200", 8, 15*time.Second)
+}
+
+func TestDynamicFaultInjectionGlobalActiveRequestCountAtScale(t *testing.T) {
+	requestCount := dynamicFaultInjectionActiveRequestCountUpperBound.Get()
+	gate := startRequestGate(t, requestCount)
+	proxyPort := startDynamicFaultInjectionActiveRequestCountEnvoyWithUpstream(t, "/status/200", gate.upstream)
+	requireDynamicFaultInjectionGlobalActiveRequestCounts(t, proxyPort, "/status/200", requestCount, 30*time.Second, gate)
+}
+
+func testDynamicFaultInjectionGlobalActiveRequestCount(t *testing.T, path string, upperBound int, timeout time.Duration) {
+	t.Helper()
+	require.Positive(t, upperBound)
+	gate := startRequestGate(t, upperBound)
+	proxyPort := startDynamicFaultInjectionActiveRequestCountEnvoyWithUpstream(t, path, gate.upstream)
+	requireDynamicFaultInjectionGlobalActiveRequestCounts(t, proxyPort, path, upperBound, timeout, gate)
+}
+
+func startDynamicFaultInjectionActiveRequestCountEnvoyWithUpstream(t *testing.T, upstreamPath, upstream string) int {
+	t.Helper()
+	routes := "- match:\n" +
+		"    prefix: " + upstreamPath + "\n" +
+		"  typed_per_filter_config:\n" +
+		"    dynamic-fault-injection:\n" +
+		"      '@type': type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilterPerRoute\n" +
+		"      dynamic_module_config: { name: composer }\n" +
+		"      filter_name: dynamic-fault-injection\n" +
+		"      filter_config:\n" +
+		"        '@type': type.googleapis.com/google.protobuf.StringValue\n" +
+		"        value: |\n" +
+		"          diagnostic: true\n" +
+		"          responses:\n" +
+		"            - status: 200\n" +
+		"              resolution: 1\n" +
+		"              distribution:\n" +
+		"                p0.0: 3s\n" +
+		"                p100.0: 3s\n" +
+		"  route:\n" +
+		"    cluster: test-upstream\n" +
+		"    timeout: 30s"
+	if upstream == "" {
+		return startDynamicFaultInjectionEnvoyWithRoutes(t, routes)
+	}
+	return startDynamicFaultInjectionEnvoyWithRoutesAndUpstream(t, routes, upstream)
+}
+
+type requestGate struct {
+	upstream string
+	arrived  <-chan struct{}
+	release  func()
+}
+
+func startRequestGate(t *testing.T, requestCount int) *requestGate {
+	t.Helper()
+	arrived := make(chan struct{}, requestCount)
+	releaseChannel := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseChannel) })
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		case <-r.Context().Done():
+			return
+		}
+		select {
+		case <-releaseChannel:
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		release()
+		server.Close()
+	})
+	return &requestGate{
+		upstream: strings.TrimPrefix(server.URL, "http://"),
+		arrived:  arrived,
+		release:  release,
+	}
+}
+
+func requireDynamicFaultInjectionGlobalActiveRequestCounts(t *testing.T, proxyPort int, path string, requestCount int, timeout time.Duration, gate *requestGate) {
+	t.Helper()
+	type requestResult struct {
+		count       int
+		workerIndex int
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives:   true,
+			MaxConnsPerHost:     requestCount,
+			MaxIdleConns:        requestCount,
+			MaxIdleConnsPerHost: requestCount,
+		},
+		Timeout: timeout,
+	}
+	defer client.CloseIdleConnections()
+
+	results := make(chan requestResult, requestCount)
+	errors := make(chan error, requestCount)
+
+	startRequest := func() {
+		go func() {
+			resp, err := client.Get(fmt.Sprintf("http://localhost:%d%s", proxyPort, path))
+			if err != nil {
+				errors <- err
+				return
+			}
+			defer func() { _ = resp.Body.Close() }()
+			_, _ = io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				errors <- fmt.Errorf("request returned status %d", resp.StatusCode)
+				return
+			}
+			count, err := strconv.Atoi(resp.Header.Get("x-fault-requests-in-flight"))
+			if err != nil {
+				errors <- fmt.Errorf("invalid active request count: %w", err)
+				return
+			}
+			workerIndex, err := strconv.Atoi(resp.Header.Get("x-fault-worker-index"))
+			if err != nil {
+				errors <- fmt.Errorf("invalid worker index: %w", err)
+				return
+			}
+			results <- requestResult{count: count, workerIndex: workerIndex}
+		}()
+	}
+
+	admissionTimer := time.NewTimer(timeout)
+	defer admissionTimer.Stop()
+	for range requestCount {
+		startRequest()
+		select {
+		case <-gate.arrived:
+		case err := <-errors:
+			require.NoError(t, err)
+		case <-admissionTimer.C:
+			t.Fatalf("timed out waiting for request admission")
+		}
+	}
+	gate.release()
+
+	counts := make([]int, 0, requestCount)
+	workerIndexes := make(map[int]struct{})
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
+	for range requestCount {
+		select {
+		case err := <-errors:
+			require.NoError(t, err)
+		case result := <-results:
+			counts = append(counts, result.count)
+			workerIndexes[result.workerIndex] = struct{}{}
+		case <-timeoutTimer.C:
+			t.Fatalf("timed out waiting for %d active request count responses", requestCount)
+		}
+	}
+
+	sort.Ints(counts)
+	for expected, count := range counts {
+		require.Equal(t, expected, count, "request-entry counts should contain every value from zero to request count minus one")
+	}
+	require.GreaterOrEqual(t, len(workerIndexes), 2, "requests should be handled by multiple Envoy workers")
+}
+
+func TestDynamicFaultInjectionPerRouteConfiguration(t *testing.T) {
 	routes := "- match:\n" +
 		"    prefix: /anything/\n" +
 		"    headers:\n" +
@@ -163,7 +341,7 @@ func TestPerRouteConfiguration(t *testing.T) {
 		"                p100.0: 20ms\n" +
 		"  route:\n" +
 		"    cluster: test-upstream"
-	proxyPort := startFaultInjectionEnvoyWithRoutes(t, routes)
+	proxyPort := startDynamicFaultInjectionEnvoyWithRoutes(t, routes)
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:%d/anything/per-route", proxyPort), nil)
 	require.NoError(t, err)
 
@@ -178,7 +356,7 @@ func TestPerRouteConfiguration(t *testing.T) {
 	})
 }
 
-func TestAbortInjection(t *testing.T) {
+func TestDynamicFaultInjectionAbortInjection(t *testing.T) {
 	minimalDelay := millis(0)
 	maximalDelay := millis(5)
 	config := fmt.Sprintf(`{
@@ -199,7 +377,7 @@ func TestAbortInjection(t *testing.T) {
 	]
 }`, minimalDelay.Milliseconds(), maximalDelay.Milliseconds())
 
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Requests to /abort: all responses sampled as 503.
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/abort/test", proxyPort), nil)
@@ -232,7 +410,7 @@ func TestAbortInjection(t *testing.T) {
 	})
 }
 
-func TestFixedDelayAccountsForUpstream(t *testing.T) {
+func TestDynamicFaultInjectionFixedDelayAccountsForUpstream(t *testing.T) {
 	fixedDelay := millis(100)
 	config := fmt.Sprintf(`{
 	"endpoints": [
@@ -252,7 +430,7 @@ func TestFixedDelayAccountsForUpstream(t *testing.T) {
 	]
 }`, fixedDelay.Milliseconds(), fixedDelay.Milliseconds())
 
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Flat 100ms distribution. The filter should only add (100ms - actual_upstream_time)
 	// as additional delay.
@@ -306,7 +484,7 @@ func TestFixedDelayAccountsForUpstream(t *testing.T) {
 	})
 }
 
-func TestCatchallEndpoint(t *testing.T) {
+func TestDynamicFaultInjectionCatchallEndpoint(t *testing.T) {
 	minimalDelay := millis(5)
 	maximalDelay := millis(20)
 	config := fmt.Sprintf(`{
@@ -328,7 +506,7 @@ func TestCatchallEndpoint(t *testing.T) {
 	]
 }`, minimalDelay.Milliseconds(), maximalDelay.Milliseconds())
 
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Requests to paths that don't match specific prefixes hit the "/" catch-all.
 	// Distribution: p0=5ms, p50=10ms, p100=20ms.
@@ -366,7 +544,7 @@ func TestCatchallEndpoint(t *testing.T) {
 	})
 }
 
-func TestMixedStatusCodes(t *testing.T) {
+func TestDynamicFaultInjectionMixedStatusCodes(t *testing.T) {
 	// Distribution bounds for the two sampled statuses.
 	minimalDelay200 := millis(30)
 	maximalDelay200 := millis(80)
@@ -399,7 +577,7 @@ func TestMixedStatusCodes(t *testing.T) {
 	]
 }`, minimalDelay200.Milliseconds(), maximalDelay200.Milliseconds(), minimalDelay429.Milliseconds(), maximalDelay429.Milliseconds())
 
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Requests to /mixed: 50% -> 200 (30-80ms delay, upstream response passes through),
 	// 50% -> 429 abort (overrides upstream response).
@@ -459,7 +637,7 @@ func TestMixedStatusCodes(t *testing.T) {
 	})
 }
 
-func TestUpstreamTimeIsSubtracted(t *testing.T) {
+func TestDynamicFaultInjectionUpstreamTimeIsSubtracted(t *testing.T) {
 	minimalDelay := millis(20)
 	maximalDelay := millis(100)
 	// httpbin's /delay/0.05 simulates a ~50ms upstream response time.
@@ -484,7 +662,7 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 	]
 }`, minimalDelay.Milliseconds(), maximalDelay.Milliseconds())
 
-	proxyPort := startFaultInjectionEnvoy(t, config)
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
 	// Use httpbin's /delay endpoint to simulate a slow upstream.
 	// With /delay/0.05 (50ms upstream) and our distribution (p0=20ms..p100=300ms),
@@ -550,9 +728,9 @@ func TestUpstreamTimeIsSubtracted(t *testing.T) {
 	})
 }
 
-// startFaultInjectionEnvoy starts an Envoy instance with the dynamic-fault-injection
+// startDynamicFaultInjectionEnvoy starts an Envoy instance with the dynamic-fault-injection
 // extension configured with the given JSON config. It returns the proxy port.
-func startFaultInjectionEnvoy(t *testing.T, config string) (proxyPort int) {
+func startDynamicFaultInjectionEnvoy(t *testing.T, config string) (proxyPort int) {
 	t.Helper()
 	ports := internaltesting.FreePorts(t, 2)
 	proxyPort, adminPort := ports[0], ports[1]
@@ -565,9 +743,15 @@ func startFaultInjectionEnvoy(t *testing.T, config string) (proxyPort int) {
 	return proxyPort
 }
 
-// startFaultInjectionEnvoyWithRoutes provides shared bootstrap wiring while
+// startDynamicFaultInjectionEnvoyWithRoutes provides shared bootstrap wiring while
 // callers specify only the route configuration under test.
-func startFaultInjectionEnvoyWithRoutes(t *testing.T, routes string) (proxyPort int) {
+func startDynamicFaultInjectionEnvoyWithRoutes(t *testing.T, routes string) (proxyPort int) {
+	upstream := internaltesting.TestUpstreamClusterInsecure.Get()
+	require.NotEmpty(t, upstream)
+	return startDynamicFaultInjectionEnvoyWithRoutesAndUpstream(t, routes, upstream)
+}
+
+func startDynamicFaultInjectionEnvoyWithRoutesAndUpstream(t *testing.T, routes, upstream string) (proxyPort int) {
 	t.Helper()
 	ports := internaltesting.FreePorts(t, 2)
 	proxyPort, adminPort := ports[0], ports[1]
@@ -578,8 +762,6 @@ func startFaultInjectionEnvoyWithRoutes(t *testing.T, routes string) (proxyPort 
 	output, err := build.CombinedOutput()
 	require.NoErrorf(t, err, "build composer: %s", output)
 
-	upstream := internaltesting.TestUpstreamClusterInsecure.Get()
-	require.NotEmpty(t, upstream)
 	upstreamHost, upstreamPort, err := net.SplitHostPort(upstream)
 	require.NoError(t, err)
 	upstreamPortNumber, err := strconv.ParseUint(upstreamPort, 10, 32)
@@ -621,6 +803,11 @@ static_resources:
 %s
   clusters:
     - name: test-upstream
+      circuit_breakers:
+        thresholds:
+          - max_connections: 10000
+            max_pending_requests: 10000
+            max_requests: 10000
       type: STATIC
       load_assignment:
         cluster_name: test-upstream
@@ -633,7 +820,7 @@ static_resources:
 	internaltesting.RunEnvoyYAML(t, proxyPort, adminPort, bootstrap, map[string]string{
 		"ENVOY_DYNAMIC_MODULES_SEARCH_PATH": moduleDir,
 		"GODEBUG":                           "cgocheck=0",
-	})
+	}, "--concurrency", "4")
 	return proxyPort
 }
 

@@ -92,6 +92,22 @@ endpoints:
 	}
 }
 
+func TestParseConfig_Diagnostic(t *testing.T) {
+	input := `
+diagnostic: true
+responses:
+  - status: 200
+    resolution: 100
+    distribution:
+      p0.0: "1ms"
+      p100.0: "10ms"
+`
+
+	cfg, err := ParseConfig([]byte(input))
+	require.NoError(t, err)
+	require.True(t, cfg.Diagnostic)
+}
+
 func TestParseConfig_InvalidProbabilityDistribution(t *testing.T) {
 	input := `
 probability_distribution: random

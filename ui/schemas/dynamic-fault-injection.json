@@ -17,6 +17,11 @@
       "enum": ["stateful", "stateless"],
       "default": "stateful"
     },
+    "diagnostic": {
+      "type": "boolean",
+      "description": "Includes the Envoy worker index diagnostic response header.",
+      "default": false
+    },
     "endpoints": {
       "type": "array",
       "description": "List of endpoint configurations, each defining fault behavior for matched routes.",

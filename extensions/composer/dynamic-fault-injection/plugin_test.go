@@ -7,6 +7,7 @@
 package impl
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared"
@@ -199,10 +200,137 @@ func TestOnRequestHeaders_MatchingRoute(t *testing.T) {
 		":path": {"/api/users"},
 	})
 	status := filter.OnRequestHeaders(headers, false)
+	t.Cleanup(filter.OnStreamComplete)
 
 	require.Equal(t, shared.HeadersStatusContinue, status)
 	require.True(t, filter.matched)
 	require.NotZero(t, filter.requestStart)
+}
+
+func TestActiveRequestCountLifecycle(t *testing.T) {
+	activeRequests.Store(0)
+	t.Cleanup(func() { activeRequests.Store(0) })
+
+	factory, err := buildFilterFactory(ValidConfig)
+	require.NoError(t, err)
+	ctrl := gomock.NewController(t)
+	filter := factory.Create(newFilterHandleWithoutPerRouteConfig(ctrl)).(*latencyFaultFilter)
+
+	filter.OnRequestHeaders(fake.NewFakeHeaderMap(map[string][]string{
+		":path": {"/api/users"},
+	}), false)
+	require.Equal(t, int64(1), activeRequests.Load())
+
+	filter.OnStreamComplete()
+	require.Equal(t, int64(0), activeRequests.Load())
+
+	filter.OnStreamComplete()
+	require.Equal(t, int64(0), activeRequests.Load())
+}
+
+func TestActiveRequestCountOnDestroyFallback(t *testing.T) {
+	activeRequests.Store(0)
+	t.Cleanup(func() { activeRequests.Store(0) })
+
+	factory, err := buildFilterFactory(ValidConfig)
+	require.NoError(t, err)
+	ctrl := gomock.NewController(t)
+	filter := factory.Create(newFilterHandleWithoutPerRouteConfig(ctrl)).(*latencyFaultFilter)
+
+	filter.OnRequestHeaders(fake.NewFakeHeaderMap(map[string][]string{
+		":path": {"/api/users"},
+	}), false)
+	filter.OnDestroy()
+	filter.OnDestroy()
+
+	require.Equal(t, int64(0), activeRequests.Load())
+}
+
+func TestActiveRequestCountOnStreamCompleteThenDestroy(t *testing.T) {
+	activeRequests.Store(0)
+	t.Cleanup(func() { activeRequests.Store(0) })
+
+	factory, err := buildFilterFactory(ValidConfig)
+	require.NoError(t, err)
+	ctrl := gomock.NewController(t)
+	filter := factory.Create(newFilterHandleWithoutPerRouteConfig(ctrl)).(*latencyFaultFilter)
+
+	filter.OnRequestHeaders(fake.NewFakeHeaderMap(map[string][]string{
+		":path": {"/api/users"},
+	}), false)
+	filter.OnStreamComplete()
+	filter.OnDestroy()
+
+	require.Equal(t, int64(0), activeRequests.Load())
+}
+
+func TestOnRequestHeaders_LoadBasedUsesActiveRequestCount(t *testing.T) {
+	activeRequests.Store(2)
+	t.Cleanup(func() { activeRequests.Store(0) })
+
+	factory, err := buildFilterFactory([]byte(`
+load_based:
+  healthy:
+    threshold_rps: 1
+    responses:
+      - status: 200
+        resolution: 1
+        distribution:
+          p0.0: "1ms"
+          p100.0: "1ms"
+  tipping_point:
+    threshold_rps: 2
+    responses:
+      - status: 503
+        resolution: 1
+        distribution:
+          p0.0: "1ms"
+          p100.0: "1ms"
+`))
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	filter := factory.Create(newFilterHandleWithoutPerRouteConfig(ctrl)).(*latencyFaultFilter)
+	filter.OnRequestHeaders(fake.NewFakeHeaderMap(map[string][]string{}), false)
+	t.Cleanup(filter.OnStreamComplete)
+
+	require.True(t, filter.matched)
+	require.Equal(t, int64(2), filter.requestEntryInFlight)
+	require.Equal(t, int64(3), activeRequests.Load())
+	require.Equal(t, 503, filter.sample.Status)
+}
+
+func TestActiveRequestCountConcurrentLifecycle(t *testing.T) {
+	activeRequests.Store(0)
+	t.Cleanup(func() { activeRequests.Store(0) })
+
+	const requestCount = 100
+	filters := make([]*latencyFaultFilter, requestCount)
+	for i := range filters {
+		filters[i] = &latencyFaultFilter{}
+	}
+
+	var start sync.WaitGroup
+	start.Add(requestCount)
+	for _, filter := range filters {
+		go func() {
+			defer start.Done()
+			filter.startRequest()
+		}()
+	}
+	start.Wait()
+	require.Equal(t, int64(requestCount), activeRequests.Load())
+
+	var finish sync.WaitGroup
+	finish.Add(requestCount)
+	for _, filter := range filters {
+		go func() {
+			defer finish.Done()
+			filter.OnStreamComplete()
+		}()
+	}
+	finish.Wait()
+	require.Equal(t, int64(0), activeRequests.Load())
 }
 
 func TestOnRequestHeaders_NonMatchingRoute(t *testing.T) {
