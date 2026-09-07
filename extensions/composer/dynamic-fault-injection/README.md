@@ -182,6 +182,7 @@ Please find an overview of the possible fields below, followed by an actual exam
 | `endpoints[].load_based.tipping_point` | Behavior above the tipping point RPS |
 | `endpoints[].load_based.grey_zone` | Transition parameters between healthy and tipping |
 | `diagnostic` | Include the diagnostic `x-fault-worker-index` response header; defaults to `false` |
+| `probability_distribution` | Compute the next response code and latency completely random and less precise (`stateless`) or precompute a full sequence precisely up front (`stateful`)  |
 
 ### Matching a Virtual Host, Method, and Path Template
 
