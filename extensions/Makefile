@@ -18,21 +18,23 @@ endif
 BOE_DATA_HOME ?= $(HOME)/.local/share/boe
 
 EXTENSION_PATH ?=
-# Try to automatically detect the EXTENSION_PATH if PWD is set from the shell
+# Try to automatically detect EXTENSION_PATH from PWD when it was not supplied.
+ifeq ($(strip $(EXTENSION_PATH)),)
 ifneq ($(PWD),)
-	MAKEFILE_DIR = $(realpath $(dir $(firstword $(MAKEFILE_LIST))))
-	CWD          = $(realpath $(PWD))
-	ifneq ($(CWD), $(MAKEFILE_DIR)) # check that we are in a subdirectory and not the extension directory itself
-	ifneq ($(filter $(MAKEFILE_DIR)/%,$(CWD)), )
+	MAKEFILE_DIR := $(realpath $(dir $(firstword $(MAKEFILE_LIST))))
+	CWD          := $(realpath $(PWD))
+	ifneq ($(CWD),$(MAKEFILE_DIR)) # check that we are in a subdirectory and not the extension directory itself
+	ifneq ($(filter $(MAKEFILE_DIR)/%,$(CWD)),)
 	ifneq ($(wildcard $(CWD)/manifest.yaml),) # Check whether manifest.yaml exists by resolves to a file which yields the path or empty string
-		EXTENSION_PATH ?= $(patsubst $(MAKEFILE_DIR)/%,%,$(CWD))
+		EXTENSION_PATH := $(patsubst $(MAKEFILE_DIR)/%,%,$(CWD))
 	endif
 	endif
 	endif
 endif
+endif
 
 # Ensure the EXTENSION_PATH always be set
-ifeq ($(EXTENSION_PATH),)
+ifeq ($(strip $(EXTENSION_PATH)),)
   $(error "EXTENSION_PATH is not set. Please set it to the path of the extension.")
 endif
 
@@ -106,49 +108,46 @@ check: format lint test-coverage
 	# to ensure that the manifest.yaml is filled in "correctly".
 	$(MAKE) -C ../cli check
 
+FORMAT_TARGETS := $(strip \
+	$(if $(filter true,$(HAS_GOLANG)),format-go) \
+	$(if $(filter true,$(HAS_RUST)),format-rust))
+LINT_TARGETS := $(strip \
+	$(if $(filter true,$(HAS_GOLANG)),lint-go) \
+	$(if $(filter true,$(HAS_RUST)),lint-rust))
+TEST_TARGETS := $(strip \
+	$(if $(filter true,$(HAS_GOLANG)),test-go) \
+	$(if $(filter true,$(HAS_RUST)),test-rust))
+TEST_COVERAGE_TARGETS := $(strip \
+	$(if $(filter true,$(HAS_GOLANG)),test-go-coverage) \
+	$(if $(filter true,$(HAS_RUST)),test-rust-coverage))
+
 .PHONY: format
-format:
-	@if [ "$(HAS_GOLANG)" = "true" ]; then \
-		$(MAKE) format-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(HAS_RUST)" = "true" ]; then \
-		$(MAKE) format-rust EXTENSION_PATH=$(EXTENSION_PATH); \
-	else \
-		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make format-go' or 'make format-rust' explicitly."; \
-		exit 1; \
-	fi
+format: $(FORMAT_TARGETS)
+ifeq ($(FORMAT_TARGETS),)
+	@echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make format-go' or 'make format-rust' explicitly."
+	@exit 1
+endif
 
 .PHONY: lint
-lint:
-	@if [ "$(HAS_GOLANG)" = "true" ]; then \
-		$(MAKE) lint-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(HAS_RUST)" = "true" ]; then \
-		$(MAKE) lint-rust EXTENSION_PATH=$(EXTENSION_PATH); \
-	else \
-		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make lint-go' or 'make lint-rust' explicitly."; \
-		exit 1; \
-	fi
+lint: $(LINT_TARGETS)
+ifeq ($(LINT_TARGETS),)
+	@echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make lint-go' or 'make lint-rust' explicitly."
+	@exit 1
+endif
 
 .PHONY: test
-test:
-	@if [ "$(HAS_GOLANG)" = "true" ]; then \
-		$(MAKE) test-go EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(HAS_RUST)" = "true" ]; then \
-		$(MAKE) test-rust EXTENSION_PATH=$(EXTENSION_PATH); \
-	else \
-		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go' or 'make test-rust' explicitly."; \
-		exit 1; \
-	fi
+test: $(TEST_TARGETS)
+ifeq ($(TEST_TARGETS),)
+	@echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go' or 'make test-rust' explicitly."
+	@exit 1
+endif
 
 .PHONY: test-coverage
-test-coverage:
-	@if [ "$(HAS_GOLANG)" = "true" ]; then \
-		$(MAKE) test-go-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
-	elif [ "$(HAS_RUST)" = "true" ]; then \
-		$(MAKE) test-rust-coverage EXTENSION_PATH=$(EXTENSION_PATH); \
-	else \
-		echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."; \
-		exit 1; \
-	fi
+test-coverage: $(TEST_COVERAGE_TARGETS)
+ifeq ($(TEST_COVERAGE_TARGETS),)
+	@echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."
+	@exit 1
+endif
 
 .PHONY: format-go
 format-go:
