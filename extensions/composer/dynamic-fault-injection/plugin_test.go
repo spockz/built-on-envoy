@@ -386,6 +386,7 @@ func newFilterHandleWithoutPerRouteConfig(ctrl *gomock.Controller) *mocks.MockHt
 	h := mocks.NewMockHttpFilterHandle(ctrl)
 	h.EXPECT().GetMostSpecificConfig().Return(nil).AnyTimes()
 	h.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
+	h.EXPECT().GetActiveSpan().Return(nil).AnyTimes()
 	return h
 }
 
@@ -393,5 +394,6 @@ func newFilterHandleWithPerRouteConfig(ctrl *gomock.Controller, perRouteConfig a
 	h := mocks.NewMockHttpFilterHandle(ctrl)
 	h.EXPECT().GetMostSpecificConfig().Return(perRouteConfig).AnyTimes()
 	h.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
+	h.EXPECT().GetActiveSpan().Return(nil).AnyTimes()
 	return h
 }

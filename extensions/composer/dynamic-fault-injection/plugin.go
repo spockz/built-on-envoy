@@ -25,6 +25,15 @@ const (
 	injectedHeader         = "x-fault-injected"
 	statusHeader           = "x-fault-status"
 	workerIndexHeader      = "x-fault-worker-index"
+
+	// Span tag names (prefixed with "fault.")
+	requestsInFlightTag = "fault.requests-in-flight"
+	addedDelayTag       = "fault.added-delay"
+	actualUpstreamTag   = "fault.actual-upstream"
+	injectedDelayTag    = "fault.injected-delay"
+	injectedTag         = "fault.injected"
+	statusTag           = "fault.status"
+	workerIndexTag      = "fault.worker-index"
 )
 
 var activeRequests atomic.Int64
@@ -64,6 +73,17 @@ type (
 		requestStart         time.Time
 
 		shared.EmptyHttpFilter
+	}
+
+	// faultAttributes holds the fault injection metadata to be set on headers and spans.
+	faultAttributes struct {
+		RequestsInFlight int64
+		AddedDelay       string
+		ActualUpstream   string
+		InjectedDelay    string
+		Injected         string
+		Status           string
+		WorkerIndex      string
 	}
 )
 
@@ -151,16 +171,24 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 	if err != nil {
 		return shared.HeadersStatusContinue
 	}
-	requestEntryInFlight := strconv.FormatInt(f.requestEntryInFlight, 10)
+
+	// Build base attributes for this response
+	var workerIndex string
+	if f.diagnostic() {
+		workerIndex = strconv.FormatUint(uint64(f.handle.GetWorkerIndex()), 10)
+	}
 
 	// If this upstream status has no configured behavior, pass through untouched.
 	if f.sample.Status < 400 && upstreamStatus != f.sample.Status {
-		headers.Set(injectedDelayHeader, "0s")
-		headers.Set(actualUpstreamHeader, elapsed.String())
-		headers.Set(addedDelayHeader, "0s")
-		headers.Set(statusHeader, status)
-		headers.Set(requestsInFlightHeader, requestEntryInFlight)
-		f.setDiagnosticHeaders(headers)
+		attrs := faultAttributes{
+			InjectedDelay:    "0s",
+			ActualUpstream:   elapsed.String(),
+			AddedDelay:       "0s",
+			Status:           status,
+			RequestsInFlight: f.requestEntryInFlight,
+			WorkerIndex:      workerIndex,
+		}
+		f.setFaultAttributes(headers, attrs)
 		return shared.HeadersStatusContinue
 	}
 	// If the sampled status is an "error" case and different from the upstream response rewrite the response
@@ -170,16 +198,35 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 			scheduler := f.handle.GetScheduler()
 			sample := f.sample
 			totalDuration := f.sample.Duration
+
+			attrs := faultAttributes{
+				Injected:         "abort",
+				InjectedDelay:    totalDuration.String(),
+				ActualUpstream:   elapsed.String(),
+				AddedDelay:       remainingDelay.String(),
+				Status:           fmt.Sprintf("%d", sample.Status),
+				RequestsInFlight: f.requestEntryInFlight,
+				WorkerIndex:      workerIndex,
+			}
+
+			// Set span tags before scheduling the delayed response
+			if span := f.handle.GetActiveSpan(); span != nil {
+				span.SetTag(injectedTag, attrs.Injected)
+				span.SetTag(injectedDelayTag, attrs.InjectedDelay)
+				span.SetTag(actualUpstreamTag, attrs.ActualUpstream)
+				span.SetTag(addedDelayTag, attrs.AddedDelay)
+				span.SetTag(statusTag, attrs.Status)
+				span.SetTag(requestsInFlightTag, strconv.FormatInt(attrs.RequestsInFlight, 10))
+				if attrs.WorkerIndex != "" {
+					span.SetTag(workerIndexTag, attrs.WorkerIndex)
+				}
+			}
+
 			responseHeaders := [][2]string{
 				{"Content-Type", "text/plain"},
-				{injectedHeader, "abort"},
-				{injectedDelayHeader, totalDuration.String()},
-				{actualUpstreamHeader, elapsed.String()},
-				{addedDelayHeader, remainingDelay.String()},
-				{statusHeader, fmt.Sprintf("%d", sample.Status)},
-				{requestsInFlightHeader, requestEntryInFlight},
 			}
-			responseHeaders = f.withDiagnosticHeaders(responseHeaders)
+			responseHeaders = setFaultAttributesToHeaderArray(responseHeaders, attrs)
+
 			go func() {
 				time.Sleep(remainingDelay)
 				scheduler.Schedule(func() {
@@ -195,15 +242,32 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 		}
 
 		// No remaining delay needed — immediate abort.
+		attrs := faultAttributes{
+			Injected:         "abort",
+			InjectedDelay:    f.sample.Duration.String(),
+			ActualUpstream:   elapsed.String(),
+			Status:           fmt.Sprintf("%d", f.sample.Status),
+			RequestsInFlight: f.requestEntryInFlight,
+			WorkerIndex:      workerIndex,
+		}
+
+		// Set span tags before sending response
+		if span := f.handle.GetActiveSpan(); span != nil {
+			span.SetTag(injectedTag, attrs.Injected)
+			span.SetTag(injectedDelayTag, attrs.InjectedDelay)
+			span.SetTag(actualUpstreamTag, attrs.ActualUpstream)
+			span.SetTag(statusTag, attrs.Status)
+			span.SetTag(requestsInFlightTag, strconv.FormatInt(attrs.RequestsInFlight, 10))
+			if attrs.WorkerIndex != "" {
+				span.SetTag(workerIndexTag, attrs.WorkerIndex)
+			}
+		}
+
 		responseHeaders := [][2]string{
 			{"Content-Type", "text/plain"},
-			{injectedHeader, "abort"},
-			{injectedDelayHeader, f.sample.Duration.String()},
-			{actualUpstreamHeader, elapsed.String()},
-			{statusHeader, fmt.Sprintf("%d", f.sample.Status)},
-			{requestsInFlightHeader, requestEntryInFlight},
 		}
-		responseHeaders = f.withDiagnosticHeaders(responseHeaders)
+		responseHeaders = setFaultAttributesToHeaderArray(responseHeaders, attrs)
+
 		f.handle.SendLocalResponse(
 			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 100-599 by ParseConfig
 			responseHeaders,
@@ -214,14 +278,18 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 	}
 
 	// For all expected status codes: add metadata headers and delay if needed.
-	headers.Set(injectedDelayHeader, f.sample.Duration.String())
-	headers.Set(actualUpstreamHeader, elapsed.String())
-	headers.Set(statusHeader, fmt.Sprintf("%d", f.sample.Status))
-	headers.Set(requestsInFlightHeader, requestEntryInFlight)
-	f.setDiagnosticHeaders(headers)
-	if remainingDelay > 0 {
-		headers.Set(addedDelayHeader, remainingDelay.String())
+	attrs := faultAttributes{
+		InjectedDelay:    f.sample.Duration.String(),
+		ActualUpstream:   elapsed.String(),
+		Status:           fmt.Sprintf("%d", f.sample.Status),
+		RequestsInFlight: f.requestEntryInFlight,
+		WorkerIndex:      workerIndex,
 	}
+	if remainingDelay > 0 {
+		attrs.AddedDelay = remainingDelay.String()
+	}
+
+	f.setFaultAttributes(headers, attrs)
 
 	// Is it worth saving the additional schedule in the case `remainingDelay == 0`?
 	if remainingDelay > 0 {
@@ -411,4 +479,84 @@ func getMostSpecificConfig[T any](handle shared.HttpFilterHandle) T { //nolint:r
 		return zero
 	}
 	return cfg
+}
+
+// setFaultAttributes sets fault injection attributes on both response headers and active span tags.
+// Headers are always set; span tags are only set if an active span is available.
+func (f *latencyFaultFilter) setFaultAttributes(headers shared.HeaderMap, attrs faultAttributes) {
+	// Set headers
+	if attrs.InjectedDelay != "" {
+		headers.Set(injectedDelayHeader, attrs.InjectedDelay)
+	}
+	if attrs.ActualUpstream != "" {
+		headers.Set(actualUpstreamHeader, attrs.ActualUpstream)
+	}
+	if attrs.AddedDelay != "" {
+		headers.Set(addedDelayHeader, attrs.AddedDelay)
+	}
+	if attrs.Status != "" {
+		headers.Set(statusHeader, attrs.Status)
+	}
+	if attrs.RequestsInFlight >= 0 {
+		headers.Set(requestsInFlightHeader, strconv.FormatInt(attrs.RequestsInFlight, 10))
+	}
+	if attrs.Injected != "" {
+		headers.Set(injectedHeader, attrs.Injected)
+	}
+	if attrs.WorkerIndex != "" {
+		headers.Set(workerIndexHeader, attrs.WorkerIndex)
+	}
+
+	// Set span tags if active span exists
+	if span := f.handle.GetActiveSpan(); span != nil {
+		if attrs.InjectedDelay != "" {
+			span.SetTag(injectedDelayTag, attrs.InjectedDelay)
+		}
+		if attrs.ActualUpstream != "" {
+			span.SetTag(actualUpstreamTag, attrs.ActualUpstream)
+		}
+		if attrs.AddedDelay != "" {
+			span.SetTag(addedDelayTag, attrs.AddedDelay)
+		}
+		if attrs.Status != "" {
+			span.SetTag(statusTag, attrs.Status)
+		}
+		if attrs.RequestsInFlight >= 0 {
+			span.SetTag(requestsInFlightTag, strconv.FormatInt(attrs.RequestsInFlight, 10))
+		}
+		if attrs.Injected != "" {
+			span.SetTag(injectedTag, attrs.Injected)
+		}
+		if attrs.WorkerIndex != "" {
+			span.SetTag(workerIndexTag, attrs.WorkerIndex)
+		}
+	}
+}
+
+// setFaultAttributesToHeaderArray sets fault injection attributes on a header array,
+// typically used for local responses. Does not set span tags (those should be set separately
+// before sending the response). Returns the modified header array.
+func setFaultAttributesToHeaderArray(headers [][2]string, attrs faultAttributes) [][2]string {
+	if attrs.Injected != "" {
+		headers = append(headers, [2]string{injectedHeader, attrs.Injected})
+	}
+	if attrs.InjectedDelay != "" {
+		headers = append(headers, [2]string{injectedDelayHeader, attrs.InjectedDelay})
+	}
+	if attrs.ActualUpstream != "" {
+		headers = append(headers, [2]string{actualUpstreamHeader, attrs.ActualUpstream})
+	}
+	if attrs.AddedDelay != "" {
+		headers = append(headers, [2]string{addedDelayHeader, attrs.AddedDelay})
+	}
+	if attrs.Status != "" {
+		headers = append(headers, [2]string{statusHeader, attrs.Status})
+	}
+	if attrs.RequestsInFlight >= 0 {
+		headers = append(headers, [2]string{requestsInFlightHeader, strconv.FormatInt(attrs.RequestsInFlight, 10)})
+	}
+	if attrs.WorkerIndex != "" {
+		headers = append(headers, [2]string{workerIndexHeader, attrs.WorkerIndex})
+	}
+	return headers
 }
