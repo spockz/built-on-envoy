@@ -126,7 +126,7 @@ func parseConfig(data []byte, source ConfigSource) (*FilterConfig, error) {
 		}
 	}
 
-	if (len(validationErrors)) > 0 {
+	if len(validationErrors) > 0 {
 		return nil, errors.Join(validationErrors...)
 	}
 
