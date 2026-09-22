@@ -131,7 +131,7 @@ func benchmarkFactoryConfig(mode string, endpointCount, resolution int) []byte {
 }
 
 func benchmarkDirectFactoryConfig(mode string) []byte {
-	return []byte(fmt.Sprintf(`probability_distribution: %s
+	return fmt.Appendf(nil, `probability_distribution: %s
 responses:
   - status: 200
     resolution: 1000
@@ -139,5 +139,5 @@ responses:
       p0.0: "1ms"
       p50.0: "10ms"
       p100.0: "100ms"
-`, mode))
+`, mode)
 }

@@ -40,6 +40,92 @@ func TestHeaderMapAdapter_GetOne(t *testing.T) {
 	require.Empty(t, adapter.GetOne("x-missing"))
 }
 
+func TestSetFaultAttributesOnHeaderMap_SetsHeadersAndSpanTagsOnce(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	handle := mocks.NewMockHttpFilterHandle(ctrl)
+	span := mocks.NewMockSpan(ctrl)
+	handle.EXPECT().GetActiveSpan().Return(span).Times(1)
+	expectFaultSpanTags(span)
+
+	attrs := testFaultAttributes()
+	headers := fake.NewFakeHeaderMap(nil)
+	filter := &latencyFaultFilter{handle: handle}
+
+	filter.setFaultAttributesOnHeaderMap(headers, &attrs)
+
+	require.Equal(t, attrs.InjectedDelay, headers.GetOne(injectedDelayHeader).ToUnsafeString())
+	require.Equal(t, attrs.ActualUpstream, headers.GetOne(actualUpstreamHeader).ToUnsafeString())
+	require.Equal(t, attrs.AddedDelay, headers.GetOne(addedDelayHeader).ToUnsafeString())
+	require.Equal(t, attrs.Status, headers.GetOne(statusHeader).ToUnsafeString())
+	require.Equal(t, "7", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
+	require.Equal(t, attrs.Injected, headers.GetOne(injectedHeader).ToUnsafeString())
+	require.Equal(t, attrs.WorkerIndex, headers.GetOne(workerIndexHeader).ToUnsafeString())
+}
+
+func TestSetFaultAttributesOnHeaderArray_SetsHeadersAndSpanTagsOnce(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	handle := mocks.NewMockHttpFilterHandle(ctrl)
+	span := mocks.NewMockSpan(ctrl)
+	handle.EXPECT().GetActiveSpan().Return(span).Times(1)
+	expectFaultSpanTags(span)
+
+	attrs := testFaultAttributes()
+	filter := &latencyFaultFilter{handle: handle}
+	headers := filter.setFaultAttributesOnHeaderArray([][2]string{{"content-type", "text/plain"}}, &attrs)
+
+	requireResponseHeader(t, headers, injectedDelayHeader, attrs.InjectedDelay)
+	requireResponseHeader(t, headers, actualUpstreamHeader, attrs.ActualUpstream)
+	requireResponseHeader(t, headers, addedDelayHeader, attrs.AddedDelay)
+	requireResponseHeader(t, headers, statusHeader, attrs.Status)
+	requireResponseHeader(t, headers, requestsInFlightHeader, "7")
+	requireResponseHeader(t, headers, injectedHeader, attrs.Injected)
+	requireResponseHeader(t, headers, workerIndexHeader, attrs.WorkerIndex)
+	requireHeaderCount(t, headers, injectedDelayHeader, 1)
+	requireHeaderCount(t, headers, actualUpstreamHeader, 1)
+	requireHeaderCount(t, headers, addedDelayHeader, 1)
+	requireHeaderCount(t, headers, statusHeader, 1)
+	requireHeaderCount(t, headers, requestsInFlightHeader, 1)
+	requireHeaderCount(t, headers, injectedHeader, 1)
+	requireHeaderCount(t, headers, workerIndexHeader, 1)
+}
+
+func testFaultAttributes() faultAttributes {
+	return faultAttributes{
+		InjectedDelay:    "100ms",
+		ActualUpstream:   "10ms",
+		AddedDelay:       "90ms",
+		Status:           "503",
+		RequestsInFlight: 7,
+		Injected:         "abort",
+		WorkerIndex:      "3",
+	}
+}
+
+func expectFaultSpanTags(span *mocks.MockSpan) {
+	span.EXPECT().SetTag(injectedDelayTag, "100ms").Times(1)
+	span.EXPECT().SetTag(actualUpstreamTag, "10ms").Times(1)
+	span.EXPECT().SetTag(addedDelayTag, "90ms").Times(1)
+	span.EXPECT().SetTag(statusTag, "503").Times(1)
+	span.EXPECT().SetTag(requestsInFlightTag, "7").Times(1)
+	span.EXPECT().SetTag(injectedTag, "abort").Times(1)
+	span.EXPECT().SetTag(workerIndexTag, "3").Times(1)
+}
+
+func requireHeaderCount(t *testing.T, headers [][2]string, name string, expected int) {
+	t.Helper()
+	count := 0
+	for _, header := range headers {
+		if header[0] == name {
+			count++
+		}
+	}
+	require.Equal(t, expected, count, "header %q count", name)
+}
+
 func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
