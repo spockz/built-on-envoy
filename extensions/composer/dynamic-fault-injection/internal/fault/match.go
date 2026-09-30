@@ -63,15 +63,3 @@ func MatchRoute(match MatchConfig, path string, headers HeaderGetter) bool {
 
 	return true
 }
-
-// ShouldApply returns true if the given percentage check passes.
-func ShouldApply(percentage float64) bool {
-	if percentage >= 100 {
-		return true
-	}
-	if percentage <= 0 {
-		return false
-	}
-	// Use crypto/rand for unbiased sampling.
-	return cryptoFloat64()*100 < percentage
-}

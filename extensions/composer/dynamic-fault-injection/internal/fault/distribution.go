@@ -140,8 +140,9 @@ func (spd *StatefulProbabilityDistribution) Sample() time.Duration {
 
 // ResponseSample represents a sampled response: status code + latency.
 type ResponseSample struct {
-	Status   int
-	Duration time.Duration
+	Status        int
+	Duration      time.Duration
+	LocalResponse *LocalResponseConfig
 }
 
 // ResponseDistribution selects a status code based on resolution weights,
@@ -152,19 +153,18 @@ type ResponseDistribution struct {
 }
 
 type responseEntry struct {
-	status       int
-	weight       int
-	distribution durationDistribution
-}
-
-// NewResponseDistribution creates a ResponseDistribution from a set of StatusDistributions.
-func NewResponseDistribution(statusDists []StatusDistribution) (*ResponseDistribution, error) {
-	return NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
+	status        int
+	weight        int
+	distribution  durationDistribution
+	localResponse *LocalResponseConfig
 }
 
 // NewResponseDistributionWithMode creates a ResponseDistribution with the requested
 // sampling mode: "stateful" or "stateless".
 func NewResponseDistributionWithMode(statusDists []StatusDistribution, distributionMode string) (*ResponseDistribution, error) {
+	if len(statusDists) == 0 {
+		return nil, fmt.Errorf("response distribution must have at least one status entry")
+	}
 	entries := make([]responseEntry, 0, len(statusDists))
 	totalWeight := 0
 
@@ -178,9 +178,10 @@ func NewResponseDistributionWithMode(statusDists []StatusDistribution, distribut
 			return nil, err
 		}
 		entries = append(entries, responseEntry{
-			status:       sd.Status,
-			weight:       sd.Resolution,
-			distribution: dist,
+			status:        sd.Status,
+			weight:        sd.Resolution,
+			distribution:  dist,
+			localResponse: sd.LocalResponse,
 		})
 		totalWeight += sd.Resolution
 	}
@@ -200,28 +201,31 @@ func (rd *ResponseDistribution) Sample() ResponseSample {
 		cumulative += entry.weight
 		if r < cumulative {
 			return ResponseSample{
-				Status:   entry.status,
-				Duration: entry.distribution.Sample(),
+				Status:        entry.status,
+				Duration:      entry.distribution.Sample(),
+				LocalResponse: entry.localResponse,
 			}
 		}
 	}
 	// Fallback (should not happen).
 	last := &rd.entries[len(rd.entries)-1]
 	return ResponseSample{
-		Status:   last.status,
-		Duration: last.distribution.Sample(),
+		Status:        last.status,
+		Duration:      last.distribution.Sample(),
+		LocalResponse: last.localResponse,
 	}
 }
 
 // LoadBasedResponseDistribution switches between healthy and tipping-point
-// distributions based on observed RPS, with grey zone transition behavior.
+// distributions based on observed load, with grey zone transition behavior.
 type LoadBasedResponseDistribution struct {
-	healthy      *ResponseDistribution
-	tippingPoint *ResponseDistribution
-	healthyRPS   float64
-	tippingRPS   float64
-	greyZone     *greyZoneState
-	mu           sync.Mutex
+	healthy          *ResponseDistribution
+	tippingPoint     *ResponseDistribution
+	healthyThreshold float64
+	tippingThreshold float64
+	greyZone         *greyZoneState
+	now              func() time.Time
+	mu               sync.Mutex
 }
 
 type greyZoneState struct {
@@ -230,35 +234,17 @@ type greyZoneState struct {
 	spikeThreshold         float64
 	spikePenaltyMultiplier float64
 	recoveryRate           float64
-	lastSpikeTime          time.Time
+	recoveryStart          time.Time
 	inSpike                bool
-}
-
-// NewLoadBasedResponseDistribution creates a load-based distribution.
-func NewLoadBasedResponseDistribution(
-	healthyDists []StatusDistribution,
-	healthyRPS float64,
-	tippingDists []StatusDistribution,
-	tippingRPS float64,
-	gz *GreyZoneConfig,
-) (*LoadBasedResponseDistribution, error) {
-	return NewLoadBasedResponseDistributionWithMode(
-		healthyDists,
-		healthyRPS,
-		tippingDists,
-		tippingRPS,
-		gz,
-		ProbabilityDistributionStateful,
-	)
 }
 
 // NewLoadBasedResponseDistributionWithMode creates a load-based distribution
 // using either stateful or stateless sampling.
 func NewLoadBasedResponseDistributionWithMode(
 	healthyDists []StatusDistribution,
-	healthyRPS float64,
+	healthyThreshold float64,
 	tippingDists []StatusDistribution,
-	tippingRPS float64,
+	tippingThreshold float64,
 	gz *GreyZoneConfig,
 	distributionMode string,
 ) (*LoadBasedResponseDistribution, error) {
@@ -272,10 +258,11 @@ func NewLoadBasedResponseDistributionWithMode(
 	}
 
 	lb := &LoadBasedResponseDistribution{
-		healthy:      healthy,
-		tippingPoint: tipping,
-		healthyRPS:   healthyRPS,
-		tippingRPS:   tippingRPS,
+		healthy:          healthy,
+		tippingPoint:     tipping,
+		healthyThreshold: healthyThreshold,
+		tippingThreshold: tippingThreshold,
+		now:              time.Now,
 	}
 
 	if gz != nil {
@@ -304,22 +291,26 @@ func newDurationDistribution(percentiles []Percentile, resolution int, distribut
 	}
 }
 
-// Sample returns a response based on the current RPS.
-// In the grey zone (between healthyRPS and tippingRPS), it interpolates
+// Sample returns a response based on the current load.
+// In the grey zone (between healthyThreshold and tippingThreshold), it interpolates
 // between healthy and tipping behavior with optional spike penalties.
-func (lb *LoadBasedResponseDistribution) Sample(currentRPS float64) ResponseSample {
+func (lb *LoadBasedResponseDistribution) Sample(currentInFlight float64) ResponseSample {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
-	if currentRPS <= lb.healthyRPS {
-		return lb.healthy.Sample()
-	}
-	if currentRPS >= lb.tippingRPS {
-		return lb.tippingPoint.Sample()
+	greyPosition := (currentInFlight - lb.healthyThreshold) / (lb.tippingThreshold - lb.healthyThreshold)
+	var penalty time.Duration
+	// Tier transitions update spike state even though penalties apply only in the grey zone.
+	if lb.greyZone != nil {
+		penalty = lb.calculateGreyZonePenalty(min(max(greyPosition, 0), 1), lb.now())
 	}
 
-	// Grey zone: interpolate between healthy and tipping.
-	greyPosition := (currentRPS - lb.healthyRPS) / (lb.tippingRPS - lb.healthyRPS)
+	if currentInFlight <= lb.healthyThreshold {
+		return lb.healthy.Sample()
+	}
+	if currentInFlight >= lb.tippingThreshold {
+		return lb.tippingPoint.Sample()
+	}
 
 	// Decide whether to use healthy or tipping distribution based on position.
 	var sample ResponseSample
@@ -329,49 +320,34 @@ func (lb *LoadBasedResponseDistribution) Sample(currentRPS float64) ResponseSamp
 		sample = lb.tippingPoint.Sample()
 	}
 
-	// Apply grey zone penalty if configured.
-	if lb.greyZone != nil {
-		penalty := lb.calculateGreyZonePenalty(greyPosition)
-		sample.Duration += penalty
-	}
+	sample.Duration += penalty
 
 	return sample
 }
 
 // calculateGreyZonePenalty computes additional latency penalty in the grey zone.
-func (lb *LoadBasedResponseDistribution) calculateGreyZonePenalty(greyPosition float64) time.Duration {
+func (lb *LoadBasedResponseDistribution) calculateGreyZonePenalty(greyPosition float64, now time.Time) time.Duration {
 	gz := lb.greyZone
 	basePenalty := time.Duration(float64(gz.penaltyBase) * greyPosition)
 
-	// Check for spike behavior.
-	now := time.Now()
 	if greyPosition >= gz.spikeThreshold {
-		if !gz.inSpike {
-			gz.inSpike = true
-			gz.lastSpikeTime = now
+		gz.inSpike = true
+		gz.recoveryStart = time.Time{}
+		return time.Duration(float64(basePenalty) * gz.spikePenaltyMultiplier)
+	}
+	if gz.inSpike {
+		if gz.recoveryStart.IsZero() {
+			gz.recoveryStart = now
 		}
-		// During a spike, apply the multiplier.
-		if now.Sub(gz.lastSpikeTime) < gz.spikePenaltyDuration {
-			return time.Duration(float64(basePenalty) * gz.spikePenaltyMultiplier)
-		}
-		// Spike duration expired, start recovery.
-		gz.inSpike = false
-	} else if gz.inSpike {
-		// Below spike threshold but was in spike — recover.
-		elapsed := now.Sub(gz.lastSpikeTime)
-		if elapsed > gz.spikePenaltyDuration {
+		elapsed := now.Sub(gz.recoveryStart)
+		if elapsed >= gz.spikePenaltyDuration {
 			gz.inSpike = false
+			gz.recoveryStart = time.Time{}
 		} else {
-			// Decay the penalty.
-			remaining := 1.0 - (float64(elapsed) / float64(gz.spikePenaltyDuration) * gz.recoveryRate)
-			if remaining < 0 {
-				remaining = 0
-				gz.inSpike = false
-			}
+			remaining := 1.0 - float64(elapsed)/float64(gz.spikePenaltyDuration)*gz.recoveryRate
 			return time.Duration(float64(basePenalty) * gz.spikePenaltyMultiplier * remaining)
 		}
 	}
-
 	return basePenalty
 }
 

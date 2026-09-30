@@ -9,6 +9,7 @@ package impl
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -178,29 +179,15 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 		workerIndex = strconv.FormatUint(uint64(f.handle.GetWorkerIndex()), 10)
 	}
 
-	// If this upstream status has no configured behavior, pass through untouched.
-	if f.sample.Status < 400 && upstreamStatus != f.sample.Status {
-		attrs := faultAttributes{
-			InjectedDelay:    "0s",
-			ActualUpstream:   elapsed.String(),
-			AddedDelay:       "0s",
-			Status:           status,
-			RequestsInFlight: f.requestEntryInFlight,
-			WorkerIndex:      workerIndex,
-		}
-		f.setFaultAttributesOnHeaderMap(headers, &attrs)
-		return shared.HeadersStatusContinue
-	}
-	// If the sampled status is an "error" case and different from the upstream response rewrite the response
-	if f.sample.Status >= 400 && f.sample.Status != upstreamStatus {
+	if f.sample.Status != upstreamStatus {
 		if remainingDelay > 0 {
-			// Delay, then send local error response.
+			// Delay, then send the sampled status as a local response.
 			scheduler := f.handle.GetScheduler()
 			sample := f.sample
 			totalDuration := f.sample.Duration
 
 			attrs := faultAttributes{
-				Injected:         "abort",
+				Injected:         injectedResponseName(sample.Status),
 				InjectedDelay:    totalDuration.String(),
 				ActualUpstream:   elapsed.String(),
 				AddedDelay:       remainingDelay.String(),
@@ -208,29 +195,25 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 				RequestsInFlight: f.requestEntryInFlight,
 				WorkerIndex:      workerIndex,
 			}
-
-			responseHeaders := [][2]string{
-				{"Content-Type", "text/plain"},
-			}
-			responseHeaders = f.setFaultAttributesOnHeaderArray(responseHeaders, &attrs)
+			body, responseHeaders := f.localResponse(sample, &attrs)
 
 			go func() {
 				time.Sleep(remainingDelay)
 				scheduler.Schedule(func() {
 					f.handle.SendLocalResponse(
-						uint32(sample.Status), //nolint:gosec // Status is validated to be 100-599 by ParseConfig
+						uint32(sample.Status), //nolint:gosec // Status is validated to be 200-599 by ParseConfig
 						responseHeaders,
-						fmt.Appendf(nil, "fault filter abort: %d\n", sample.Status),
-						"fault_abort",
+						body,
+						localResponseDetail(sample.Status),
 					)
 				})
 			}()
 			return shared.HeadersStatusStopAllAndBuffer
 		}
 
-		// No remaining delay needed — immediate abort.
+		// No remaining delay needed; send the sampled status immediately.
 		attrs := faultAttributes{
-			Injected:         "abort",
+			Injected:         injectedResponseName(f.sample.Status),
 			InjectedDelay:    f.sample.Duration.String(),
 			ActualUpstream:   elapsed.String(),
 			Status:           fmt.Sprintf("%d", f.sample.Status),
@@ -238,21 +221,18 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 			WorkerIndex:      workerIndex,
 		}
 
-		responseHeaders := [][2]string{
-			{"Content-Type", "text/plain"},
-		}
-		responseHeaders = f.setFaultAttributesOnHeaderArray(responseHeaders, &attrs)
+		body, responseHeaders := f.localResponse(f.sample, &attrs)
 
 		f.handle.SendLocalResponse(
-			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 100-599 by ParseConfig
+			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 200-599 by ParseConfig
 			responseHeaders,
-			fmt.Appendf(nil, "fault filter abort: %d\n", f.sample.Status),
-			"fault_abort",
+			body,
+			localResponseDetail(f.sample.Status),
 		)
 		return shared.HeadersStatusStop
 	}
 
-	// For all expected status codes: add metadata headers and delay if needed.
+	// Matching statuses retain the upstream response and only receive any remaining delay.
 	attrs := faultAttributes{
 		InjectedDelay:    f.sample.Duration.String(),
 		ActualUpstream:   elapsed.String(),
@@ -281,6 +261,44 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 
 	// Upstream was already slow enough — no additional delay needed.
 	return shared.HeadersStatusContinue
+}
+
+func (f *latencyFaultFilter) localResponse(sample fault.ResponseSample, attrs *faultAttributes) ([]byte, [][2]string) {
+	body := []byte(fmt.Sprintf("fault filter abort: %d\n", sample.Status))
+	if sample.Status < 400 {
+		body = []byte{}
+	}
+	responseHeaders := make([][2]string, 0, 1)
+	configuredContentType := false
+	if sample.LocalResponse != nil {
+		if sample.LocalResponse.Body != nil {
+			body = []byte(*sample.LocalResponse.Body)
+		}
+		for _, header := range sample.LocalResponse.Headers {
+			if strings.EqualFold(header.Name, "content-type") {
+				configuredContentType = true
+			}
+			responseHeaders = append(responseHeaders, [2]string{strings.ToLower(header.Name), header.Value})
+		}
+	}
+	if !configuredContentType {
+		responseHeaders = append([][2]string{{"content-type", "text/plain"}}, responseHeaders...)
+	}
+	return body, f.setFaultAttributesOnHeaderArray(responseHeaders, attrs)
+}
+
+func injectedResponseName(status int) string {
+	if status < 400 {
+		return "response"
+	}
+	return "abort"
+}
+
+func localResponseDetail(status int) string {
+	if status < 400 {
+		return "fault_response"
+	}
+	return "fault_abort"
 }
 
 func (f *latencyFaultFilter) diagnostic() bool {
@@ -345,6 +363,9 @@ func buildFilterFactory(config []byte) (*latencyFaultFilterFactory, error) {
 }
 
 func buildFilterFactoryForSource(config []byte, source fault.ConfigSource) (*latencyFaultFilterFactory, error) {
+	if err := validateConfigAgainstSchema(config, source); err != nil {
+		return nil, fmt.Errorf("failed to validate config: %w", err)
+	}
 	var cfg *fault.FilterConfig
 	var err error
 	if source == fault.PerRouteConfigSource {
@@ -370,9 +391,9 @@ func buildFilterFactoryForSource(config []byte, source fault.ConfigSource) (*lat
 		if cfg.LoadBased != nil {
 			factory.loadBased, err = fault.NewLoadBasedResponseDistributionWithMode(
 				cfg.LoadBased.Healthy.Responses,
-				cfg.LoadBased.Healthy.ThresholdRPS,
+				cfg.LoadBased.Healthy.ThresholdInFlight,
 				cfg.LoadBased.TippingPoint.Responses,
-				cfg.LoadBased.TippingPoint.ThresholdRPS,
+				cfg.LoadBased.TippingPoint.ThresholdInFlight,
 				cfg.LoadBased.GreyZone,
 				cfg.ProbabilityDistribution,
 			)
@@ -402,9 +423,9 @@ func buildFilterFactoryForSource(config []byte, source fault.ConfigSource) (*lat
 		if ep.LoadBased != nil {
 			lb, err := fault.NewLoadBasedResponseDistributionWithMode(
 				ep.LoadBased.Healthy.Responses,
-				ep.LoadBased.Healthy.ThresholdRPS,
+				ep.LoadBased.Healthy.ThresholdInFlight,
 				ep.LoadBased.TippingPoint.Responses,
-				ep.LoadBased.TippingPoint.ThresholdRPS,
+				ep.LoadBased.TippingPoint.ThresholdInFlight,
 				ep.LoadBased.GreyZone,
 				cfg.ProbabilityDistribution,
 			)

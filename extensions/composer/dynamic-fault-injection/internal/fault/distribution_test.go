@@ -9,6 +9,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestProbabilityDistribution_Sample(t *testing.T) {
@@ -153,7 +155,7 @@ func TestResponseDistribution_StatusWeighting(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistribution(statusDists)
+	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,6 +182,36 @@ func TestResponseDistribution_StatusWeighting(t *testing.T) {
 	}
 }
 
+func TestResponseDistribution_DuplicateStatusesKeepSelectedLocalResponse(t *testing.T) {
+	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+		t.Run(mode, func(t *testing.T) {
+			firstBody, secondBody := "first", "second"
+			distributions := []StatusDistribution{
+				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "1ms", "p100.0": "2ms"}, LocalResponse: &LocalResponseConfig{Body: &firstBody}},
+				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "100ms", "p100.0": "200ms"}, LocalResponse: &LocalResponseConfig{Body: &secondBody}},
+			}
+			distribution, err := NewResponseDistributionWithMode(distributions, mode)
+			require.NoError(t, err)
+			seen := map[string]bool{}
+			for range 1000 {
+				sample := distribution.Sample()
+				require.Equal(t, 503, sample.Status)
+				require.NotNil(t, sample.LocalResponse)
+				require.NotNil(t, sample.LocalResponse.Body)
+				body := *sample.LocalResponse.Body
+				seen[body] = true
+				if sample.Duration < 10*time.Millisecond {
+					require.Equal(t, "first", body)
+				} else {
+					require.Equal(t, "second", body)
+				}
+			}
+			require.True(t, seen["first"])
+			require.True(t, seen["second"])
+		})
+	}
+}
+
 func TestResponseDistribution_DurationRanges(t *testing.T) {
 	statusDists := []StatusDistribution{
 		{
@@ -193,7 +225,7 @@ func TestResponseDistribution_DurationRanges(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistribution(statusDists)
+	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,7 +255,7 @@ func TestResponseDistribution_FlatDistribution(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistribution(statusDists)
+	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -302,7 +334,7 @@ func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistribution(healthyDists, 100, tippingDists, 500, nil)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -318,6 +350,16 @@ func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 			t.Errorf("at healthy RPS, expected duration <= 10ms, got %v", sample.Duration)
 		}
 	}
+}
+
+func TestLoadBasedResponseDistribution_CarriesTierLocalResponse(t *testing.T) {
+	healthyBody, tippingBody := "healthy", "tipping"
+	healthy := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}, LocalResponse: &LocalResponseConfig{Body: &healthyBody}}}
+	tipping := []StatusDistribution{{Status: 503, Resolution: 1, Distribution: map[string]string{"p0.0": "10ms"}, LocalResponse: &LocalResponseConfig{Body: &tippingBody}}}
+	distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 20, nil, ProbabilityDistributionStateful)
+	require.NoError(t, err)
+	require.Equal(t, "healthy", *distribution.Sample(5).LocalResponse.Body)
+	require.Equal(t, "tipping", *distribution.Sample(25).LocalResponse.Body)
 }
 
 func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
@@ -342,7 +384,7 @@ func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistribution(healthyDists, 100, tippingDists, 500, nil)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -379,7 +421,7 @@ func TestLoadBasedResponseDistribution_GreyZone(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistribution(healthyDists, 100, tippingDists, 500, nil)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -439,7 +481,7 @@ func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
 		RecoveryRate:           0.5,
 	}
 
-	lb, err := NewLoadBasedResponseDistribution(healthyDists, 100, tippingDists, 500, gz)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, gz, ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -500,5 +542,98 @@ func assertWithinTolerance(t *testing.T, name string, actual, expected time.Dura
 	diff := math.Abs(float64(actual-expected)) / float64(expected)
 	if diff > tolerance {
 		t.Errorf("%s: expected ~%v, got %v (diff: %.2f%%, tolerance: %.2f%%)", name, expected, actual, diff*100, tolerance*100)
+	}
+}
+
+func TestResponseDistribution_RejectsEmptyStatuses(t *testing.T) {
+	for _, statuses := range [][]StatusDistribution{nil, {}} {
+		for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+			distribution, err := NewResponseDistributionWithMode(statuses, mode)
+			require.ErrorContains(t, err, "at least one status entry")
+			require.Nil(t, distribution)
+		}
+		distribution, err := NewResponseDistributionWithMode(statuses, ProbabilityDistributionStateful)
+		require.Error(t, err)
+		require.Nil(t, distribution)
+	}
+}
+
+func TestLoadBasedResponseDistribution_RejectsEmptyTier(t *testing.T) {
+	valid := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}}}
+	for _, healthyEmpty := range []bool{true, false} {
+		healthy, tipping := valid, valid
+		if healthyEmpty {
+			healthy = nil
+		} else {
+			tipping = nil
+		}
+		distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 100, nil, ProbabilityDistributionStateful)
+		require.ErrorContains(t, err, "at least one status entry")
+		require.Nil(t, distribution)
+		for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+			distribution, err = NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 100, nil, mode)
+			require.ErrorContains(t, err, "at least one status entry")
+			require.Nil(t, distribution)
+		}
+	}
+}
+
+func TestLoadBasedResponseDistribution_SustainedSpikeAndRecovery(t *testing.T) {
+	type step struct {
+		elapsed time.Duration
+		load    float64
+		penalty time.Duration
+	}
+	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+		for _, scenario := range []struct {
+			name  string
+			steps []step
+		}{
+			{name: "sustained spike then recovery", steps: []step{
+				{0, 180, 240 * time.Millisecond},
+				{2 * time.Second, 180, 240 * time.Millisecond},
+				{10 * time.Second, 180, 240 * time.Millisecond},
+				{10 * time.Second, 150, 150 * time.Millisecond},
+				{11 * time.Second, 150, 112500 * time.Microsecond},
+				{12 * time.Second, 150, 50 * time.Millisecond},
+			}},
+			{name: "spike resumes during recovery", steps: []step{
+				{0, 180, 240 * time.Millisecond},
+				{time.Second, 150, 150 * time.Millisecond},
+				{2 * time.Second, 150, 112500 * time.Microsecond},
+				{2 * time.Second, 180, 240 * time.Millisecond},
+				{3 * time.Second, 150, 150 * time.Millisecond},
+				{4 * time.Second, 150, 112500 * time.Microsecond},
+				{5 * time.Second, 150, 50 * time.Millisecond},
+			}},
+			{name: "tipping tier starts spike", steps: []step{
+				{0, 250, 0},
+				{10 * time.Second, 150, 150 * time.Millisecond},
+				{11 * time.Second, 150, 112500 * time.Microsecond},
+				{12 * time.Second, 150, 50 * time.Millisecond},
+			}},
+			{name: "healthy tier starts recovery", steps: []step{
+				{0, 180, 240 * time.Millisecond},
+				{10 * time.Second, 250, 0},
+				{11 * time.Second, 50, 0},
+				{12 * time.Second, 150, 112500 * time.Microsecond},
+				{13 * time.Second, 150, 50 * time.Millisecond},
+			}},
+		} {
+			t.Run(mode+"/"+scenario.name, func(t *testing.T) {
+				responses := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "0s", "p100.0": "0s"}}}
+				distribution, err := NewLoadBasedResponseDistributionWithMode(responses, 100, responses, 200, &GreyZoneConfig{
+					PenaltyBase: "100ms", SpikeThreshold: 0.8, SpikePenaltyDuration: "2s", SpikePenaltyMultiplier: 3, RecoveryRate: 0.5,
+				}, mode)
+				require.NoError(t, err)
+				now := time.Unix(1000, 0)
+				distribution.now = func() time.Time { return now }
+				for _, step := range scenario.steps {
+					now = time.Unix(1000, 0).Add(step.elapsed)
+					sample := distribution.Sample(step.load)
+					require.Equal(t, step.penalty, sample.Duration, "elapsed=%s load=%v", step.elapsed, step.load)
+				}
+			})
+		}
 	}
 }

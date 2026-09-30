@@ -13,6 +13,7 @@ import (
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared"
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared/fake"
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared/mocks"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
@@ -77,15 +78,99 @@ func TestConfigFactory_Create_EmptyConfig(t *testing.T) {
 	mockHandle := mocks.NewMockHttpFilterConfigHandle(ctrl)
 	mockHandle.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
 
-	// Empty config should fail because no endpoints are configured.
 	filterFactory, err := factory.Create(mockHandle, []byte{})
-	// An empty config with no endpoints is technically valid YAML but the filter
-	// will just have zero endpoints. Whether this is an error depends on ParseConfig.
-	if err != nil {
-		require.Nil(t, filterFactory)
-	} else {
-		require.NotNil(t, filterFactory)
+	require.Error(t, err)
+	require.Nil(t, filterFactory)
+}
+
+func TestConfigFactory_ValidatesSchemaBeforeTypedParsing(t *testing.T) {
+	factory := &CustomHttpFilterConfigFactory{}
+	ctrl := gomock.NewController(t)
+	mockHandle := mocks.NewMockHttpFilterConfigHandle(ctrl)
+	mockHandle.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
+
+	for name, config := range map[string][]byte{
+		"numeric body":        []byte(`{"responses":[{"status":500,"resolution":1,"distribution":{"p0.0":"1ms"},"local_response":{"body":123}}]}`),
+		"null local response": []byte("responses:\n  - status: 500\n    resolution: 1\n    distribution: {p0.0: 1ms}\n    local_response: null\n"),
+		"unknown field":       []byte("responses: []\nunknown: true\n"),
+		"legacy threshold":    []byte("load_based:\n  healthy: {threshold_rps: 1, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}\n  tipping_point: {threshold_rps: 2, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}\n"),
+		"empty responses":     []byte("responses: []\n"),
+		"empty load tier":     []byte("load_based:\n  healthy: {threshold_in_flight: 1, responses: []}\n  tipping_point: {threshold_in_flight: 2, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}\n"),
+		"timestamp body":      []byte("responses:\n  - status: 500\n    resolution: 1\n    distribution: {p0.0: 1ms}\n    local_response: {body: 2026-01-01}\n"),
+		"non-finite number":   []byte("responses:\n  - status: 200\n    resolution: .nan\n    distribution: {p0.0: 1ms}\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := factory.Create(mockHandle, config)
+			require.Nil(t, result)
+			var schemaErr *jsonschema.ValidationError
+			require.ErrorAs(t, err, &schemaErr)
+		})
 	}
+}
+
+func TestConfigFactory_ThresholdInFlightAndSchemaBoundary(t *testing.T) {
+	factory := &CustomHttpFilterConfigFactory{}
+	ctrl := gomock.NewController(t)
+	mockHandle := mocks.NewMockHttpFilterConfigHandle(ctrl)
+	mockHandle.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
+
+	valid := []byte("load_based:\n  healthy: {threshold_in_flight: 1, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}\n  tipping_point: {threshold_in_flight: 2, responses: [{status: 503, resolution: 1, distribution: {p0.0: 1ms}}]}\n")
+	result, err := factory.Create(mockHandle, valid)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	perRoute, err := factory.CreatePerRoute(valid)
+	require.NoError(t, err)
+	require.NotNil(t, perRoute)
+
+	semanticError := []byte("load_based:\n  healthy: {threshold_in_flight: 2, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}\n  tipping_point: {threshold_in_flight: 1, responses: [{status: 503, resolution: 1, distribution: {p0.0: 1ms}}]}\n")
+	result, err = factory.Create(mockHandle, semanticError)
+	require.Nil(t, result)
+	require.Error(t, err)
+	var schemaErr *jsonschema.ValidationError
+	require.NotErrorAs(t, err, &schemaErr, "threshold ordering is a semantic parse error")
+}
+
+func TestConfigFactory_AliasesMergesAndSingleDocument(t *testing.T) {
+	factory := &CustomHttpFilterConfigFactory{}
+	ctrl := gomock.NewController(t)
+	mockHandle := mocks.NewMockHttpFilterConfigHandle(ctrl)
+	mockHandle.EXPECT().Log(gomock.Any(), gomock.Any()).AnyTimes()
+
+	validAlias := []byte("endpoints:\n  - &endpoint\n    match: {}\n    responses:\n      - &response {status: 503, resolution: 1, distribution: {p0.0: 1ms}, local_response: &custom {body: down}}\n  - <<: *endpoint\n    match: {prefix: /other}\n")
+	result, err := factory.Create(mockHandle, validAlias)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	override := []byte("responses:\n  - status: 503\n    resolution: 1\n    distribution: {p0.0: 1ms}\n    local_response:\n      <<: &defaults {body: null}\n      body: ''\n")
+	result, err = factory.Create(mockHandle, override)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	secondDocument := append(append([]byte(nil), ValidPerRouteConfig...), []byte("\n---\nnull\n")...)
+	result, err = factory.Create(mockHandle, secondDocument)
+	require.Nil(t, result)
+	require.Error(t, err)
+
+	duplicateJSONKey := []byte(`{"responses":[],"responses":[]}`)
+	result, err = factory.Create(mockHandle, duplicateJSONKey)
+	require.Nil(t, result)
+	require.Error(t, err)
+
+	nonStringKey := []byte("responses: []\n? [not, a, string]\n: value\n")
+	result, err = factory.Create(mockHandle, nonStringKey)
+	require.Nil(t, result)
+	require.Error(t, err)
+
+	recursiveAlias := []byte("responses: &loop [*loop]\n")
+	result, err = factory.Create(mockHandle, recursiveAlias)
+	require.Nil(t, result)
+	require.Error(t, err)
+
+	mergedEndpoints := []byte("<<: &defaults {endpoints: []}\nresponses:\n  - status: 200\n    resolution: 1\n    distribution: {p0.0: 1ms}\n")
+	perRoute, err := factory.CreatePerRoute(mergedEndpoints)
+	require.Nil(t, perRoute)
+	require.ErrorContains(t, err, "endpoints cannot be used in per-route configuration")
 }
 
 func TestConfigFactory_Create_InvalidConfig(t *testing.T) {
@@ -271,7 +356,7 @@ func TestOnRequestHeaders_LoadBasedUsesActiveRequestCount(t *testing.T) {
 	factory, err := buildFilterFactory([]byte(`
 load_based:
   healthy:
-    threshold_rps: 1
+    threshold_in_flight: 1
     responses:
       - status: 200
         resolution: 1
@@ -279,7 +364,7 @@ load_based:
           p0.0: "1ms"
           p100.0: "1ms"
   tipping_point:
-    threshold_rps: 2
+    threshold_in_flight: 2
     responses:
       - status: 503
         resolution: 1

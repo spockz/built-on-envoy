@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	internaltesting "github.com/tetratelabs/built-on-envoy/internal/testing"
@@ -65,28 +66,28 @@ func TestDynamicFaultInjectionDistributionDelay(t *testing.T) {
 		req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/delay/0", proxyPort), nil)
 		require.NoError(t, err)
 
-		internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+		internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 			defer func() { _ = resp.Body.Close() }()
 			_, _ = io.ReadAll(resp.Body)
 
-			require.Equal(t, 200, resp.StatusCode)
+			require.Equal(c, 200, resp.StatusCode)
 
 			// Verify upstream filter headers are present.
 			delayHeader := resp.Header.Get("x-fault-injected-delay")
-			require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set (target duration)")
+			require.NotEmpty(c, delayHeader, "x-fault-injected-delay header should be set (target duration)")
 
 			upstreamHeader := resp.Header.Get("x-fault-actual-upstream")
-			require.NotEmpty(t, upstreamHeader, "x-fault-actual-upstream header should be set")
+			require.NotEmpty(c, upstreamHeader, "x-fault-actual-upstream header should be set")
 
 			statusHeader := resp.Header.Get("x-fault-status")
-			require.Equal(t, "200", statusHeader, "x-fault-status header should be 200")
+			require.Equal(c, "200", statusHeader, "x-fault-status header should be 200")
 
 			// The target delay should be within the distribution range (20-300ms).
 			targetDelay, err := time.ParseDuration(delayHeader)
-			require.NoError(t, err)
-			require.GreaterOrEqual(t, targetDelay.Milliseconds(), minimalDelay.Milliseconds(),
+			require.NoError(c, err)
+			require.GreaterOrEqual(c, targetDelay.Milliseconds(), minimalDelay.Milliseconds(),
 				"target delay should be at least p0 (20ms)")
-			require.LessOrEqual(t, targetDelay.Milliseconds(), maximalDelay.Milliseconds(),
+			require.LessOrEqual(c, targetDelay.Milliseconds(), maximalDelay.Milliseconds(),
 				"target delay should be at most p100 (300ms)")
 
 			durations = append(durations, elapsed)
@@ -124,7 +125,7 @@ func TestDynamicFaultInjectionDistributionDelay(t *testing.T) {
 		"average delay should be meaningful (got %v)", avgDelay)
 }
 
-func TestDynamicFaultInjectionDirectBehaviorConfigurationPassThroughForUnconfiguredStatus(t *testing.T) {
+func TestDynamicFaultInjectionDirectBehaviorConfigurationForcesSampledStatus(t *testing.T) {
 	config := `{
   "responses": [
     {
@@ -138,16 +139,132 @@ func TestDynamicFaultInjectionDirectBehaviorConfigurationPassThroughForUnconfigu
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/direct", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, _ time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, _ time.Duration) bool {
 		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.ReadAll(resp.Body)
-		require.Equal(t, http.StatusNotFound, resp.StatusCode)
-		require.Equal(t, "404", resp.Header.Get("x-fault-status"))
-		require.Equal(t, "0s", resp.Header.Get("x-fault-injected-delay"))
-		require.Equal(t, "0s", resp.Header.Get("x-fault-added-delay"))
-		require.NotEmpty(t, resp.Header.Get("x-fault-actual-upstream"))
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(c, err)
+		require.Equal(c, http.StatusOK, resp.StatusCode)
+		require.Equal(c, "200", resp.Header.Get("x-fault-status"))
+		require.Equal(c, "response", resp.Header.Get("x-fault-injected"))
+		require.Empty(c, body)
+		require.NotEmpty(c, resp.Header.Get("x-fault-actual-upstream"))
 		return true
 	})
+}
+
+func TestDynamicFaultInjectionCustomLocalResponses(t *testing.T) {
+	config := `{
+  "endpoints": [
+    {
+      "match": {"exact": "/status/500"},
+      "responses": [{
+        "status": 503,
+        "resolution": 1,
+        "distribution": {"p0.0": "80ms", "p100.0": "80ms"},
+        "local_response": {
+          "body": "{\"error\":\"unavailable\"}",
+          "headers": [
+            {"name": "content-type", "value": "application/problem+json"},
+            {"name": "retry-after", "value": "2"},
+            {"name": "set-cookie", "value": "first=1"},
+            {"name": "set-cookie", "value": "second=2"}
+          ]
+        }
+      }]
+    },
+    {
+      "match": {"exact": "/status/200"},
+      "responses": [{
+        "status": 204,
+        "resolution": 1,
+        "distribution": {"p0.0": "80ms", "p100.0": "80ms"},
+        "local_response": {"body": ""}
+      }]
+    },
+    {
+      "match": {"exact": "/status/201"},
+      "responses": [{"status": 205, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": ""}}]
+    },
+    {
+      "match": {"exact": "/status/202"},
+      "responses": [{"status": 304, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": ""}}]
+    },
+    {
+      "match": {"exact": "/status/501"},
+      "responses": [{"status": 503, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": ""}}]
+    },
+    {
+      "match": {"exact": "/status/203"},
+      "responses": [{"status": 200, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": "forced head body"}}]
+    },
+    {
+      "match": {"exact": "/anything/matching"},
+      "responses": [{"status": 200, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": "configured replacement"}}]
+    }
+  ]
+}`
+	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	request := func(method, path string) (*http.Response, time.Duration) {
+		t.Helper()
+		start := time.Now()
+		req, err := http.NewRequest(method, fmt.Sprintf("http://localhost:%d%s", proxyPort, path), nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		return resp, time.Since(start)
+	}
+	jsonResponse, elapsed := request(http.MethodGet, "/status/500")
+	defer func() { _ = jsonResponse.Body.Close() }()
+	body, err := io.ReadAll(jsonResponse.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, jsonResponse.StatusCode)
+	require.Equal(t, jsonResponse.StatusCode, mustAtoi(t, jsonResponse.Header.Get("x-fault-status")))
+	require.JSONEq(t, `{"error":"unavailable"}`, string(body))
+	require.Equal(t, "application/problem+json", jsonResponse.Header.Get("content-type"))
+	require.Equal(t, "2", jsonResponse.Header.Get("retry-after"))
+	require.Equal(t, []string{"first=1", "second=2"}, jsonResponse.Header.Values("set-cookie"))
+	require.GreaterOrEqual(t, elapsed, 80*time.Millisecond)
+
+	emptyResponse, emptyElapsed := request(http.MethodGet, "/status/200")
+	defer func() { _ = emptyResponse.Body.Close() }()
+	emptyBody, err := io.ReadAll(emptyResponse.Body)
+	require.NoError(t, err)
+	require.Empty(t, emptyBody)
+	require.Equal(t, http.StatusNoContent, emptyResponse.StatusCode)
+	require.Equal(t, emptyResponse.StatusCode, mustAtoi(t, emptyResponse.Header.Get("x-fault-status")))
+	require.GreaterOrEqual(t, emptyElapsed, 80*time.Millisecond)
+	for path, wantStatus := range map[string]int{"/status/201": http.StatusResetContent, "/status/202": http.StatusNotModified, "/status/501": http.StatusServiceUnavailable} {
+		response, _ := request(http.MethodGet, path)
+		responseBody, readErr := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		require.NoError(t, readErr)
+		require.Empty(t, responseBody, "status %d", wantStatus)
+		require.Equal(t, wantStatus, response.StatusCode)
+		require.Equal(t, strconv.Itoa(wantStatus), response.Header.Get("x-fault-status"))
+	}
+	headResponse, _ := request(http.MethodHead, "/status/203")
+	headBody, err := io.ReadAll(headResponse.Body)
+	_ = headResponse.Body.Close()
+	require.NoError(t, err)
+	require.Empty(t, headBody)
+	require.Equal(t, http.StatusOK, headResponse.StatusCode)
+
+	matchingResponse, _ := request(http.MethodGet, "/anything/matching")
+	matchingBody, err := io.ReadAll(matchingResponse.Body)
+	_ = matchingResponse.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, matchingResponse.StatusCode)
+	require.NotEqual(t, "configured replacement", string(matchingBody))
+	require.Contains(t, string(matchingBody), "/anything/matching")
+}
+
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	status, err := strconv.Atoi(value)
+	require.NoError(t, err)
+	return status
 }
 
 func TestDynamicFaultInjectionGlobalActiveRequestCountAcrossWorkers(t *testing.T) {
@@ -345,13 +462,13 @@ func TestDynamicFaultInjectionPerRouteConfiguration(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:%d/anything/per-route", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.ReadAll(resp.Body)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		require.Equal(t, "200", resp.Header.Get("x-fault-status"))
-		require.Equal(t, "20ms", resp.Header.Get("x-fault-injected-delay"))
-		require.GreaterOrEqual(t, elapsed, 20*time.Millisecond)
+		require.Equal(c, http.StatusOK, resp.StatusCode)
+		require.Equal(c, "200", resp.Header.Get("x-fault-status"))
+		require.Equal(c, "20ms", resp.Header.Get("x-fault-injected-delay"))
+		require.GreaterOrEqual(c, elapsed, 20*time.Millisecond)
 		return true
 	})
 }
@@ -383,27 +500,27 @@ func TestDynamicFaultInjectionAbortInjection(t *testing.T) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/abort/test", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		body, _ := io.ReadAll(resp.Body)
 
 		t.Logf("abort response: status=%d elapsed=%v body=%s", resp.StatusCode, elapsed, string(body))
-		require.Equal(t, 503, resp.StatusCode)
-		require.Contains(t, string(body), "fault filter abort")
-		require.Equal(t, "abort", resp.Header.Get("x-fault-injected"))
+		require.Equal(c, 503, resp.StatusCode)
+		require.Contains(c, string(body), "fault filter abort")
+		require.Equal(c, "abort", resp.Header.Get("x-fault-injected"))
 
 		// The abort distribution is p0=0ms, p100=5ms — target delay should be within range.
 		delayHeader := resp.Header.Get("x-fault-injected-delay")
-		require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set")
+		require.NotEmpty(c, delayHeader, "x-fault-injected-delay header should be set")
 		targetDelay, err := time.ParseDuration(delayHeader)
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, targetDelay, minimalDelay,
+		require.NoError(c, err)
+		require.GreaterOrEqual(c, targetDelay, minimalDelay,
 			"target delay should be at least p0")
-		require.LessOrEqual(t, targetDelay, maximalDelay,
+		require.LessOrEqual(c, targetDelay, maximalDelay,
 			"target delay should be within distribution range")
 
 		// The actual elapsed time should be at most the maximal delay plus a buffer for the
 		// upstream round-trip and network jitter.
-		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
+		require.LessOrEqual(c, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -437,7 +554,7 @@ func TestDynamicFaultInjectionFixedDelayAccountsForUpstream(t *testing.T) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/status/200", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		_, _ = io.ReadAll(resp.Body)
 
 		t.Logf("fixed delay: status=%d elapsed=%v target=%s upstream=%s added=%s",
@@ -446,38 +563,38 @@ func TestDynamicFaultInjectionFixedDelayAccountsForUpstream(t *testing.T) {
 			resp.Header.Get("x-fault-actual-upstream"),
 			resp.Header.Get("x-fault-added-delay"))
 
-		require.Equal(t, 200, resp.StatusCode)
+		require.Equal(c, 200, resp.StatusCode)
 
 		// Total elapsed time should be ~100ms (target) regardless of upstream speed.
 		// Allow a small buffer below for timing slack and a larger buffer above for jitter.
-		require.GreaterOrEqual(t, elapsed, fixedDelay-millis(10),
+		require.GreaterOrEqual(c, elapsed, fixedDelay-millis(10),
 			"total request time should be at least ~100ms (±10m for jitter)")
-		require.LessOrEqual(t, elapsed, fixedDelay+millis(400),
+		require.LessOrEqual(c, elapsed, fixedDelay+millis(400),
 			"total request time should not be excessively long")
 
 		// The target header should show the fixed delay.
 		delayHeader := resp.Header.Get("x-fault-injected-delay")
-		require.Equal(t, fmt.Sprintf("%dms", fixedDelay.Milliseconds()), delayHeader)
+		require.Equal(c, fmt.Sprintf("%dms", fixedDelay.Milliseconds()), delayHeader)
 
 		// The actual upstream time should be much less than the fixed delay.
 		upstreamHeader := resp.Header.Get("x-fault-actual-upstream")
-		require.NotEmpty(t, upstreamHeader)
+		require.NotEmpty(c, upstreamHeader)
 		upstreamTime, err := time.ParseDuration(upstreamHeader)
-		require.NoError(t, err)
-		require.Less(t, upstreamTime, fixedDelay-millis(10),
+		require.NoError(c, err)
+		require.Less(c, upstreamTime, fixedDelay-millis(10),
 			"upstream time for /status/200 should be well under the fixed delay")
 
 		// The filter should have added the remaining delay (fixedDelay - upstream).
 		addedHeader := resp.Header.Get("x-fault-added-delay")
-		require.NotEmpty(t, addedHeader, "x-fault-added-delay should be set when target > upstream")
+		require.NotEmpty(c, addedHeader, "x-fault-added-delay should be set when target > upstream")
 		addedDelay, err := time.ParseDuration(addedHeader)
-		require.NoError(t, err)
+		require.NoError(c, err)
 
 		// upstream + added should approximate the fixed delay target.
 		totalDelay := upstreamTime + addedDelay
-		require.GreaterOrEqual(t, totalDelay, fixedDelay-millis(10),
+		require.GreaterOrEqual(c, totalDelay, fixedDelay-millis(10),
 			"upstream + added delay should be at least ~100ms")
-		require.LessOrEqual(t, totalDelay, fixedDelay+millis(50),
+		require.LessOrEqual(c, totalDelay, fixedDelay+millis(50),
 			"upstream + added delay should not overshoot significantly")
 
 		return true
@@ -513,7 +630,7 @@ func TestDynamicFaultInjectionCatchallEndpoint(t *testing.T) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/status/200", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		_, _ = io.ReadAll(resp.Body)
 
 		t.Logf("catchall: status=%d elapsed=%v target=%s upstream=%s",
@@ -521,23 +638,23 @@ func TestDynamicFaultInjectionCatchallEndpoint(t *testing.T) {
 			resp.Header.Get("x-fault-injected-delay"),
 			resp.Header.Get("x-fault-actual-upstream"))
 
-		require.Equal(t, 200, resp.StatusCode)
-		require.NotEmpty(t, resp.Header.Get("x-fault-injected-delay"),
+		require.Equal(c, 200, resp.StatusCode)
+		require.NotEmpty(c, resp.Header.Get("x-fault-injected-delay"),
 			"should have target delay header from catchall endpoint")
-		require.NotEmpty(t, resp.Header.Get("x-fault-actual-upstream"),
+		require.NotEmpty(c, resp.Header.Get("x-fault-actual-upstream"),
 			"should have actual upstream header")
 
 		// The catch-all distribution is p0=5ms, p50=10ms, p100=20ms.
 		targetDelay, err := time.ParseDuration(resp.Header.Get("x-fault-injected-delay"))
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, targetDelay, minimalDelay,
+		require.NoError(c, err)
+		require.GreaterOrEqual(c, targetDelay, minimalDelay,
 			"target delay should be at least p0")
-		require.LessOrEqual(t, targetDelay, maximalDelay,
+		require.LessOrEqual(c, targetDelay, maximalDelay,
 			"target delay should be at most p100")
 
 		// The actual elapsed time should be at most the maximal delay plus a buffer for the
 		// upstream round-trip and network jitter.
-		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
+		require.LessOrEqual(c, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -579,7 +696,7 @@ func TestDynamicFaultInjectionMixedStatusCodes(t *testing.T) {
 
 	proxyPort := startDynamicFaultInjectionEnvoy(t, config)
 
-	// Requests to /mixed: 50% -> 200 (30-80ms delay, upstream response passes through),
+	// Requests to /mixed: 50% -> 200 (30-80ms delay),
 	// 50% -> 429 abort (overrides upstream response).
 	gotUpstream := false
 	got429 := false
@@ -587,8 +704,9 @@ func TestDynamicFaultInjectionMixedStatusCodes(t *testing.T) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/mixed/test", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		_, _ = io.ReadAll(resp.Body)
+		require.Equal(c, strconv.Itoa(resp.StatusCode), resp.Header.Get("x-fault-status"))
 
 		t.Logf("mixed: status=%d elapsed=%v fault-status=%s delay=%s",
 			resp.StatusCode, elapsed, resp.Header.Get("x-fault-status"),
@@ -596,41 +714,35 @@ func TestDynamicFaultInjectionMixedStatusCodes(t *testing.T) {
 
 		// Assert timing based on which status was sampled.
 		delayHeader := resp.Header.Get("x-fault-injected-delay")
-		require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set")
+		require.NotEmpty(c, delayHeader, "x-fault-injected-delay header should be set")
 		targetDelay, err := time.ParseDuration(delayHeader)
-		require.NoError(t, err)
+		require.NoError(c, err)
 
 		if resp.StatusCode == 429 {
 			// 429 distribution: p0=0ms, p100=5ms.
-			require.GreaterOrEqualf(t, targetDelay, minimalDelay429,
+			require.GreaterOrEqualf(c, targetDelay, minimalDelay429,
 				"429 target delay should be at least p0 (%v)", minimalDelay429)
-			require.LessOrEqual(t, targetDelay, maximalDelay429,
+			require.LessOrEqual(c, targetDelay, maximalDelay429,
 				"429 target delay should be within distribution range (%v - %v)", minimalDelay429, maximalDelay429)
 			// The actual elapsed time should be at most the maximal delay plus a buffer for the
 			// upstream round-trip and network jitter.
-			require.LessOrEqual(t, elapsed, maximalDelay429+millis(100),
+			require.LessOrEqual(c, elapsed, maximalDelay429+millis(100),
 				"429 elapsed time should be at most p100 + buffer")
 			got429 = true
 		} else {
 			if resp.StatusCode == 200 {
 				// 200 distribution: p0=30ms, p50=50ms, p100=80ms.
-				require.GreaterOrEqualf(t, targetDelay, minimalDelay200,
+				require.GreaterOrEqualf(c, targetDelay, minimalDelay200,
 					"200 target delay should be at least p0 (%v)", minimalDelay200)
-				require.LessOrEqualf(t, targetDelay, maximalDelay200,
+				require.LessOrEqualf(c, targetDelay, maximalDelay200,
 					"200 target delay should be at most p100 (%v)", maximalDelay200)
 				// The actual elapsed time should be at most the maximal delay plus a buffer for the
 				// upstream round-trip and network jitter.
-				require.LessOrEqual(t, elapsed, maximalDelay200+millis(100),
+				require.LessOrEqual(c, elapsed, maximalDelay200+millis(100),
 					"200 elapsed time should be at most p100 + buffer")
 				gotUpstream = true
 			} else {
-				// Unconfigured upstream statuses pass through and expose zero injected delay.
-				require.Equal(t, http.StatusNotFound, resp.StatusCode)
-				require.Equal(t, time.Duration(0), targetDelay)
-				require.Equal(t, "404", resp.Header.Get("x-fault-status"))
-				require.Equal(t, "0s", resp.Header.Get("x-fault-added-delay"))
-				require.NotEmpty(t, resp.Header.Get("x-fault-actual-upstream"))
-				gotUpstream = true
+				require.Fail(c, "unexpected response status", "got %d", resp.StatusCode)
 			}
 		}
 		return gotUpstream && got429 // By requiring that both statuses are seen, we ensure we see both 200 and 429 at one point.
@@ -670,7 +782,7 @@ func TestDynamicFaultInjectionUpstreamTimeIsSubtracted(t *testing.T) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/delay/0.05", proxyPort), nil)
 	require.NoError(t, err)
 
-	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(resp *http.Response, elapsed time.Duration) bool {
+	internaltesting.RequireEventuallyRequestWithTiming(t, req, func(c *assert.CollectT, resp *http.Response, elapsed time.Duration) bool {
 		_, _ = io.ReadAll(resp.Body)
 
 		t.Logf("upstream_subtraction: status=%d elapsed=%v target=%s upstream=%s added=%s",
@@ -679,33 +791,33 @@ func TestDynamicFaultInjectionUpstreamTimeIsSubtracted(t *testing.T) {
 			resp.Header.Get("x-fault-actual-upstream"),
 			resp.Header.Get("x-fault-added-delay"))
 
-		require.Equal(t, 200, resp.StatusCode)
+		require.Equal(c, 200, resp.StatusCode)
 
 		// The target delay should be within the distribution range (20-300ms).
 		delayHeader := resp.Header.Get("x-fault-injected-delay")
-		require.NotEmpty(t, delayHeader, "x-fault-injected-delay header should be set")
+		require.NotEmpty(c, delayHeader, "x-fault-injected-delay header should be set")
 		targetDelay, err := time.ParseDuration(delayHeader)
-		require.NoError(t, err)
-		require.GreaterOrEqualf(t, targetDelay, minimalDelay,
+		require.NoError(c, err)
+		require.GreaterOrEqualf(c, targetDelay, minimalDelay,
 			"target delay should be at least p0 (%v)", targetDelay)
-		require.LessOrEqualf(t, targetDelay, maximalDelay,
+		require.LessOrEqualf(c, targetDelay, maximalDelay,
 			"target delay should be at most p100 (%v)", targetDelay)
 
 		// The upstream time should reflect httpbin's /delay/0.05 (~50ms).
 		upstreamHeader := resp.Header.Get("x-fault-actual-upstream")
-		require.NotEmpty(t, upstreamHeader, "x-fault-actual-upstream header should be set")
+		require.NotEmpty(c, upstreamHeader, "x-fault-actual-upstream header should be set")
 		upstreamTime, err := time.ParseDuration(upstreamHeader)
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, upstreamTime, upstreamDelay-millis(10),
+		require.NoError(c, err)
+		require.GreaterOrEqual(c, upstreamTime, upstreamDelay-millis(10),
 			"upstream time should reflect httpbin /delay/0.05 (~50ms)")
 
 		// If the target was less than upstream time, no additional delay should be added.
 		// If greater, the added delay should be approximately target - upstream.
 		if addedHeader := resp.Header.Get("x-fault-added-delay"); addedHeader != "" {
 			addedDelay, err := time.ParseDuration(addedHeader)
-			require.NoError(t, err)
+			require.NoError(c, err)
 			// Added delay should never exceed the target.
-			require.LessOrEqual(t, addedDelay, targetDelay,
+			require.LessOrEqual(c, addedDelay, targetDelay,
 				"added delay should not exceed target delay")
 		}
 
@@ -713,15 +825,15 @@ func TestDynamicFaultInjectionUpstreamTimeIsSubtracted(t *testing.T) {
 		// complete faster than the slow upstream) and at most the maximal target delay plus a
 		// buffer for the upstream round-trip and network jitter.
 
-		requireMinimalMaximalAndAverageDurations(t,
+		requireMinimalMaximalAndAverageDurations(c,
 			[]time.Duration{elapsed},
 			upstreamTime, millis(30),
 			minimalDelay,
 			maximalDelay,
 			millis(100))
-		require.GreaterOrEqual(t, elapsed, upstreamDelay-millis(10),
+		require.GreaterOrEqual(c, elapsed, upstreamDelay-millis(10),
 			"elapsed time should be at least the upstream delay (~50ms)")
-		require.LessOrEqual(t, elapsed, maximalDelay+millis(100),
+		require.LessOrEqual(c, elapsed, maximalDelay+millis(100),
 			"elapsed time should be at most p100 + buffer")
 
 		return true
@@ -824,7 +936,7 @@ static_resources:
 	return proxyPort
 }
 
-func requireMinimalMaximalAndAverageDurations(t *testing.T, durations []time.Duration, expectedAvgDelay, averageTolerance, expectedMinDelay, expectedMaxDelay, tolerance time.Duration) {
+func requireMinimalMaximalAndAverageDurations(t require.TestingT, durations []time.Duration, expectedAvgDelay, averageTolerance, expectedMinDelay, expectedMaxDelay, tolerance time.Duration) {
 	var totalDelay time.Duration
 	var actualMinimalDelay time.Duration
 	var actualMaximalDelay time.Duration
@@ -839,8 +951,6 @@ func requireMinimalMaximalAndAverageDurations(t *testing.T, durations []time.Dur
 	}
 	numRequests := len(durations)
 	avgDelay := totalDelay / time.Duration(numRequests)
-	t.Logf("average request time: %v", avgDelay)
-
 	require.GreaterOrEqualf(t, actualMinimalDelay, expectedMinDelay,
 		"elapsed delays should be at least p0 (%dms)", expectedMinDelay)
 	require.LessOrEqualf(t, actualMaximalDelay, expectedMaxDelay+tolerance,

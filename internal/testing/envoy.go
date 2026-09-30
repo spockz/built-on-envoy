@@ -3,8 +3,8 @@
 // The full text of the Apache license is available in the LICENSE file at
 // the root of the repo.
 
-// This direct func-e runner lets E2E tests exercise bootstrap-only Envoy
-// features, such as typed_per_filter_config, without expanding the BOE CLI.
+// Package internaltesting includes a direct func-e runner so E2E tests can exercise
+// bootstrap-only Envoy features, such as typed_per_filter_config, without expanding the BOE CLI.
 package internaltesting
 
 import (

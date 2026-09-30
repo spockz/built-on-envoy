@@ -108,6 +108,133 @@ responses:
 	require.True(t, cfg.Diagnostic)
 }
 
+func TestParseConfig_LocalResponse(t *testing.T) {
+	valid := `responses:
+  - status: 204
+    resolution: 1
+    distribution: {p0.0: "1ms"}
+    local_response:
+      body: ""
+      headers:
+        - {name: Set-Cookie, value: "a=1"}
+        - {name: Set-Cookie, value: "b=2"}
+        - {name: Content-Type, value: application/json}
+`
+	cfg, err := ParsePerRouteConfig([]byte(valid))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Responses[0].LocalResponse)
+	require.NotNil(t, cfg.Responses[0].LocalResponse.Body)
+	require.Empty(t, *cfg.Responses[0].LocalResponse.Body)
+	require.Len(t, cfg.Responses[0].LocalResponse.Headers, 3)
+
+	for _, input := range []string{
+		strings.Replace(valid, "local_response:\n", "local_response: null\n", 1),
+		strings.Replace(valid, `body: ""`, "body: null", 1),
+		strings.Replace(valid, `body: ""`, "body: 12", 1),
+		strings.Replace(valid, "headers:\n", "headers: null\n", 1),
+		strings.Replace(valid, "value: \"a=1\"", "value: 12", 1),
+		strings.Replace(valid, "name: Set-Cookie", "name: null", 1),
+		strings.Replace(valid, "name: Set-Cookie", "name: Content-Length", 1),
+		strings.Replace(valid, "name: Set-Cookie", "name: x-fault-status", 1),
+		strings.Replace(valid, "value: application/json", "value: \"bad\\nvalue\"", 1),
+		strings.Replace(valid, "name: Content-Type, value: application/json", "name: Content-Type, value: ''", 1),
+		strings.Replace(valid, "name: Content-Type, value: application/json", "name: Content-Type, value: ' \t'", 1),
+		strings.Replace(valid, "name: Content-Type, value: application/json", "name: Content-Type, value: '\u00a0'", 1),
+		strings.Replace(valid, "- {name: Content-Type, value: application/json}", "- {name: Content-Type, value: application/json}\n        - {name: content-type, value: text/plain}", 1),
+		strings.Replace(valid, "- {name: Set-Cookie, value: \"a=1\"}", "- null", 1),
+		strings.Replace(valid, `body: ""`, `body: content`, 1),
+		strings.Replace(valid, "status: 204", "status: 199", 1),
+	} {
+		_, err := ParsePerRouteConfig([]byte(input))
+		require.Error(t, err, "input: %s", input)
+	}
+}
+
+func TestParseConfig_LocalResponseNestedBehavior(t *testing.T) {
+	endpointConfig := `endpoints:
+  - match: {prefix: /}
+    responses:
+      - status: 500
+        resolution: 1
+        distribution: {p0.0: 1ms}
+        local_response: {body: custom}
+`
+	cfg, err := ParseConfig([]byte(endpointConfig))
+	require.NoError(t, err)
+	require.Equal(t, "custom", *cfg.Endpoints[0].Responses[0].LocalResponse.Body)
+
+	loadConfig := `load_based:
+  healthy:
+    threshold_in_flight: 1
+    responses:
+      - status: 500
+        resolution: 1
+        distribution: {p0.0: 1ms}
+        local_response: {body: healthy}
+  tipping_point:
+    threshold_in_flight: 2
+    responses:
+      - status: 503
+        resolution: 1
+        distribution: {p0.0: 2ms}
+        local_response: {body: tipping}
+`
+	cfg, err = ParseConfig([]byte(loadConfig))
+	require.NoError(t, err)
+	require.Equal(t, "healthy", *cfg.LoadBased.Healthy.Responses[0].LocalResponse.Body)
+	require.Equal(t, "tipping", *cfg.LoadBased.TippingPoint.Responses[0].LocalResponse.Body)
+}
+
+func TestParseConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
+	valid := `endpoints:
+  - &endpoint
+    match: {prefix: /one}
+    responses: &responses
+      - status: 500
+        resolution: 1
+        distribution: {p0.0: 1ms}
+        local_response: &local
+          body: &body '{"error":"down"}'
+          headers:
+            - {name: content-type, value: *body}
+            - {name: x-extra, value: "ok"}
+  - <<: *endpoint
+    match: {prefix: /two}
+    responses: *responses
+`
+	cfg, err := ParseConfig([]byte(valid))
+	require.NoError(t, err)
+	require.Len(t, cfg.Endpoints, 2)
+	require.Equal(t, cfg.Endpoints[0].Responses[0].LocalResponse.Headers[0].Value, *cfg.Endpoints[0].Responses[0].LocalResponse.Body)
+
+	validOverride := `responses:
+  - status: 500
+    resolution: 1
+    distribution: {p0.0: 1ms}
+    local_response:
+      <<: &defaults {body: null, headers: null}
+      body: ""
+      headers: []
+`
+	_, err = ParsePerRouteConfig([]byte(validOverride))
+	require.NoError(t, err, "explicit fields must override invalid merged defaults")
+
+	for _, invalid := range []string{
+		`responses: &responses
+  - &response {status: 500, resolution: 1, distribution: {p0.0: 1ms}, local_response: {body: null}}
+`,
+		`responses:
+  - status: 500
+    resolution: 1
+    distribution: {p0.0: 1ms}
+    local_response: {headers: [{name: x-test, value: 1}]}
+`,
+	} {
+		_, err := ParsePerRouteConfig([]byte(invalid))
+		require.Error(t, err)
+	}
+}
+
 func TestParseConfig_InvalidProbabilityDistribution(t *testing.T) {
 	input := `
 probability_distribution: random
@@ -135,7 +262,7 @@ endpoints:
       prefix: "/api/"
     load_based:
       healthy:
-        threshold_rps: 100
+        threshold_in_flight: 100
         responses:
           - status: 200
             resolution: 100
@@ -144,7 +271,7 @@ endpoints:
               p50.0: "5ms"
               p99.0: "50ms"
       tipping_point:
-        threshold_rps: 500
+        threshold_in_flight: 500
         responses:
           - status: 200
             resolution: 50
@@ -179,11 +306,11 @@ endpoints:
 	if ep.LoadBased == nil {
 		t.Fatal("expected load_based config")
 	}
-	if ep.LoadBased.Healthy.ThresholdRPS != 100 {
-		t.Errorf("expected healthy threshold 100, got %v", ep.LoadBased.Healthy.ThresholdRPS)
+	if ep.LoadBased.Healthy.ThresholdInFlight != 100 {
+		t.Errorf("expected healthy threshold 100, got %v", ep.LoadBased.Healthy.ThresholdInFlight)
 	}
-	if ep.LoadBased.TippingPoint.ThresholdRPS != 500 {
-		t.Errorf("expected tipping_point threshold 500, got %v", ep.LoadBased.TippingPoint.ThresholdRPS)
+	if ep.LoadBased.TippingPoint.ThresholdInFlight != 500 {
+		t.Errorf("expected tipping_point threshold 500, got %v", ep.LoadBased.TippingPoint.ThresholdInFlight)
 	}
 	if ep.LoadBased.GreyZone == nil {
 		t.Fatal("expected grey_zone config")
@@ -371,7 +498,7 @@ endpoints:
       prefix: "/api/"
     load_based:
       tipping_point:
-        threshold_rps: 500
+        threshold_in_flight: 500
         responses:
           - status: 200
             resolution: 100
@@ -394,7 +521,7 @@ endpoints:
       prefix: "/api/"
     load_based:
       healthy:
-        threshold_rps: 500
+        threshold_in_flight: 500
         responses:
           - status: 200
             resolution: 100
@@ -403,7 +530,7 @@ endpoints:
               p50.0: "10ms"
               p99.0: "100ms"
       tipping_point:
-        threshold_rps: 100
+        threshold_in_flight: 100
         responses:
           - status: 200
             resolution: 100
@@ -518,18 +645,6 @@ func TestParsePercentileDistribution_NonDecreasing(t *testing.T) {
 	}
 }
 
-func TestTotalResolution(t *testing.T) {
-	responses := []StatusDistribution{
-		{Status: 200, Resolution: 90},
-		{Status: 503, Resolution: 10},
-	}
-
-	total := TotalResolution(responses)
-	if total != 100 {
-		t.Errorf("expected total resolution 100, got %d", total)
-	}
-}
-
 func TestMutuallyExclusiveConfigurationOfStandardAndLoadBasedConfig(t *testing.T) {
 	input := `
 endpoints:
@@ -550,7 +665,7 @@ endpoints:
           p99.0: "500ms"
     load_based:
       healthy:
-        threshold_rps: 100
+        threshold_in_flight: 100
         responses:
         - status: 200
           resolution: 100
@@ -559,7 +674,7 @@ endpoints:
             p50.0: "5ms"
             p99.0: "50ms"
       tipping_point:
-          threshold_rps: 500
+          threshold_in_flight: 500
           responses:
           - status: 200
             resolution: 50
@@ -573,12 +688,12 @@ endpoints:
               p0.0: "10ms"
               p50.0: "50ms"
               p99.0: "100ms"
-          grey_zone:
-            penalty_base: "10ms"
-            spike_threshold: 0.8
-            spike_penalty_duration: "5s"
-            spike_penalty_multiplier: 2.0
-            recovery_rate: 0.1
+      grey_zone:
+        penalty_base: "10ms"
+        spike_threshold: 0.8
+        spike_penalty_duration: "5s"
+        spike_penalty_multiplier: 2.0
+        recovery_rate: 0.1
 `
 
 	_, err := ParseConfig([]byte(input))
@@ -625,4 +740,49 @@ func TestParseConfig_JSONFromStruct(t *testing.T) {
 	if ep.Responses[1].Status != 503 {
 		t.Errorf("expected status 503, got %d", ep.Responses[1].Status)
 	}
+}
+
+func TestParseConfig_RejectsUnknownFields(t *testing.T) {
+	for _, input := range []string{
+		`diagnostics: true`,
+		`endpoints: [{mach: {prefix: /api}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`,
+		`endpoints: [{match: {prefixx: /api}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`,
+		`responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}, extra: true}]`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			for _, parse := range []func([]byte) (*FilterConfig, error){ParseConfig, ParsePerRouteConfig} {
+				cfg, err := parse([]byte(input))
+				require.ErrorContains(t, err, "not found")
+				require.Nil(t, cfg)
+			}
+		})
+	}
+}
+
+func TestParseConfig_LoadBasedRequiresResponses(t *testing.T) {
+	for _, tier := range []string{"healthy", "tipping_point"} {
+		for _, empty := range []string{"", "responses: null", "responses: []"} {
+			t.Run(tier+"/"+empty, func(t *testing.T) {
+				response := `responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]`
+				healthy, tipping := response, response
+				if tier == "healthy" {
+					healthy = empty
+				} else {
+					tipping = empty
+				}
+				input := "load_based:\n  healthy:\n    threshold_in_flight: 10\n    " + healthy + "\n  tipping_point:\n    threshold_in_flight: 100\n    " + tipping + "\n"
+				for _, parse := range []func([]byte) (*FilterConfig, error){ParseConfig, ParsePerRouteConfig} {
+					cfg, err := parse([]byte(input))
+					require.ErrorContains(t, err, "load_based."+tier+".responses must have at least one entry")
+					require.Nil(t, cfg)
+				}
+			})
+		}
+	}
+}
+
+func TestParseConfig_EmptyMatchIsCatchAll(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`endpoints: [{match: {}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`))
+	require.NoError(t, err)
+	require.True(t, MatchRoute(cfg.Endpoints[0].Match, "/any/path", nil))
 }

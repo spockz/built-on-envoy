@@ -125,21 +125,3 @@ func TestMatchRoute_EmptyMatch(t *testing.T) {
 		t.Error("expected empty match config to match everything")
 	}
 }
-
-func TestShouldApply_Always(t *testing.T) {
-	if !ShouldApply(100) {
-		t.Error("expected ShouldApply(100) to return true")
-	}
-	if !ShouldApply(150) {
-		t.Error("expected ShouldApply(150) to return true")
-	}
-}
-
-func TestShouldApply_Never(t *testing.T) {
-	if ShouldApply(0) {
-		t.Error("expected ShouldApply(0) to return false")
-	}
-	if ShouldApply(-10) {
-		t.Error("expected ShouldApply(-10) to return false")
-	}
-}

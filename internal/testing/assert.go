@@ -97,10 +97,13 @@ func RequireEventuallyRequest(t *testing.T, req *http.Request, condition func(r 
 	}, time.Minute, 200*time.Millisecond)
 }
 
-// Similar to [RequireEventuallyRequest] with the condition also depending on the time it took the get the response.
-func RequireEventuallyRequestWithTiming(t *testing.T, req *http.Request, condition func(r *http.Response, duration time.Duration) bool) {
+// RequireEventuallyRequestWithTiming is similar to [RequireEventuallyRequest], with the condition
+// also depending on the time it took to get the response. Assertions must use the supplied collector.
+func RequireEventuallyRequestWithTiming(t *testing.T, req *http.Request, condition func(c *assert.CollectT, r *http.Response, duration time.Duration) bool) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		assert.NoError(c, checkRequest(req, condition))
+		assert.NoError(c, checkRequest(req, func(r *http.Response, duration time.Duration) bool {
+			return condition(c, r, duration)
+		}))
 	}, time.Minute, 200*time.Millisecond)
 }
 
@@ -120,7 +123,7 @@ func checkRequest(req *http.Request, condition func(r *http.Response, duration t
 }
 
 func liftConditionToConditionWithDuration(condition func(r *http.Response) bool) func(r *http.Response, duration time.Duration) bool {
-	return func(r *http.Response, duration time.Duration) bool {
+	return func(r *http.Response, _ time.Duration) bool {
 		return condition(r)
 	}
 }

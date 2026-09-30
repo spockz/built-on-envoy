@@ -12,8 +12,8 @@ If the upstream is already slower than the target, no additional delay is added.
 
 - **Percentile-based latency injection**: Configure latency distributions using flexible percentile notation (`p0.0`, `p50.0`, `p99.9`, `p100.0`)
 - **Per-status-code distributions**: Define different latency profiles for different HTTP status codes (e.g., 200s are fast, 503s are slow)
-- **Resolution-based weighting**: Use `resolution` as both the sampling accuracy and the relative weight for status code selection
-- **Load-based behavior**: Configure different response profiles based on current RPS with smooth grey-zone transitions
+- **Resolution-based weighting**: Use `resolution` as both the relative weight for status selection and the number of latency samples per status in stateful mode
+- **Load-based behavior**: Configure different response profiles based on the current in-flight request count with smooth grey-zone transitions
 - **Grey zone penalties**: Model degradation with spike detection, penalty multipliers, and recovery rates
 - **Route matching**: Apply different fault configurations via prefix/exact path matching and header matching
 - **First-match routing**: Endpoints are evaluated in order; first match wins
@@ -33,7 +33,7 @@ If the upstream is already slower than the target, no additional delay is added.
 | Response rate limiting | ✅ | ❌ |
 | Per-route configuration | Via Envoy per-route config | Supported |
 | Runtime configuration | ✅ | ❌ |
-| Exact distribution over N requests | ❌ | ✅ (stateful distribution) |
+| Precomputed per-status latency samples | ❌ | ✅ (stateful distribution) |
 
 ## Usage 
 
@@ -156,10 +156,35 @@ typed_per_filter_config:
 The filter-level `endpoints[]` configuration and the per-route direct configuration are separate
 mechanisms. A route-level configuration replaces the filter-level behavior for that route.
 
-If the upstream responds with a status code that has no configured behavior for the selected
-endpoint/per-route config, the filter passes the response through without injecting latency and
-still sets fault metadata headers: `x-fault-injected-delay: 0s`, `x-fault-added-delay: 0s`,
-`x-fault-status: <upstream status>`, and `x-fault-actual-upstream: <measured duration>`.
+The sampled status is authoritative: if it differs from the upstream status, the filter returns a
+local response with the sampled status after the remaining configured delay. Matching statuses
+keep the upstream response body and headers. A forced response can set a consumer-specific body and
+headers with `local_response`:
+
+```yaml
+responses:
+  - status: 503
+    resolution: 1
+    distribution: {p0.0: "1ms", p100.0: "5ms"}
+    local_response:
+      body: '{"type":"about:blank","title":"Unavailable"}'
+      headers:
+        - {name: content-type, value: application/problem+json}
+        - {name: retry-after, value: "2"}
+        - {name: set-cookie, value: "first=1; Path=/"}
+        - {name: set-cookie, value: "second=2; Path=/"}
+```
+
+Omitting `body` keeps the generated fault message for sampled statuses 400 and above; sampled
+statuses below 400 default to an empty body. Omitting `local_response` or its `headers` keeps the
+normal defaults, including `text/plain` for bodies that carry a content type. An explicit empty body
+is supported. Repeated headers such as `Set-Cookie` are emitted as separate pairs. Envoy calculates
+`Content-Length`; reserved hop-by-hop, content-length, and `x-fault-*` headers are rejected. Statuses
+204, 205, and 304 must have an empty body. Envoy may remove `Content-Type` for empty bodies and
+bodyless statuses. Matching upstream statuses retain the upstream content even when `local_response`
+is configured.
+
+Invalid local response configuration fails filter construction.
 
 The filter is configured as native YAML in the Envoy config using `google.protobuf.StringValue` as the `filter_config` type.
 Envoy parses the YAML natively and serializes it as JSON to the module — no string escaping or `value: |` indirection needed.
@@ -170,23 +195,30 @@ Please find an overview of the possible fields below, followed by an actual exam
 | Field | Description |
 |-------|-------------|
 | `endpoints` | Array of endpoint configurations. First match wins. |
+| `endpoints[].match` | Optional route selector; omitted or empty matches all requests |
 | `endpoints[].match.prefix` | Match requests whose path starts with this prefix |
 | `endpoints[].match.exact` | Match requests with exactly this path |
 | `endpoints[].match.headers` | Array of header match conditions (all must match) |
 | `endpoints[].responses` | Array of status-code distributions (weighted by resolution) |
-| `endpoints[].responses[].status` | HTTP status code (100-599) |
+| `endpoints[].responses[].status` | Terminal HTTP status code (200-599) |
+| `endpoints[].responses[].local_response` | Optional body and response header pairs used when the sampled status differs from upstream |
+| `endpoints[].responses[].local_response.body` | UTF-8 response body; omitted bodies default to empty below 400 and generated fault text at 400 and above |
+| `endpoints[].responses[].local_response.headers` | Optional header pairs; repeated names are retained and Envoy calculates `Content-Length` |
 | `endpoints[].responses[].resolution` | Weight for status selection AND number of pre-computed samples |
 | `endpoints[].responses[].distribution` | Percentile-to-duration mapping |
 | `endpoints[].load_based` | Load-sensitive behavior configuration |
-| `endpoints[].load_based.healthy` | Behavior below the healthy RPS threshold |
-| `endpoints[].load_based.tipping_point` | Behavior above the tipping point RPS |
+| `endpoints[].load_based.healthy` | Behavior below the healthy in-flight request threshold |
+| `endpoints[].load_based.tipping_point` | Behavior above the tipping point in-flight request threshold |
 | `endpoints[].load_based.grey_zone` | Transition parameters between healthy and tipping |
 | `diagnostic` | Include the diagnostic `x-fault-worker-index` response header; defaults to `false` |
-| `probability_distribution` | Compute the next response code and latency completely random and less precise (`stateless`) or precompute a full sequence precisely up front (`stateful`)  |
+| `probability_distribution` | Select the latency sampling mode: random interpolation (`stateless`) or precomputed latency samples (`stateful`). Status selection remains weighted-random in both modes. |
 
 ### Matching a Virtual Host, Method, and Path Template
 
 #### Filter-Level (`endpoints[]`, not per-route)
+
+An empty `match: {}` is an explicit catch-all and shadows every later endpoint.
+Place catch-all endpoints last. Unknown configuration fields are rejected at load time.
 
 The `endpoints[]` matcher supports only `prefix` and `exact` path matching.
 It does not support URI templates directly (for example, `/foo/bar/{id}`).
@@ -297,7 +329,7 @@ Distribution values must be non-decreasing (a higher percentile cannot have a sh
 |-------|-------------|
 | `penalty_base` | Base latency penalty at full grey zone position (e.g., "50ms") |
 | `spike_threshold` | Grey zone position (0-1) above which spike behavior activates |
-| `spike_penalty_duration` | How long a spike penalty persists (e.g., "2s") |
+| `spike_penalty_duration` | Recovery window after load drops below the spike threshold (e.g., "2s") |
 | `spike_penalty_multiplier` | Multiplier applied to base penalty during spikes |
 | `recovery_rate` | Rate at which spike penalty decays (0-1) |
 
@@ -391,9 +423,10 @@ Unlike a traditional downstream HTTP filter that injects delay *before* the requ
 2. **On response** (`OnResponseHeaders`): Measures how long the upstream actually took, calculates `remaining = target - elapsed`, and:
     - If `remaining > 0`: delays the response by that amount before forwarding to the client
     - If `remaining <= 0`: the upstream was already slow enough — no additional delay
-    - If sampled status is 4xx/5xx: overrides the response with a local error response
+    - If the sampled status differs from upstream: returns the sampled status as a local response after any remaining delay
+    - If the statuses match: retains the upstream response body and headers
 
-This means the client observes a total latency that matches the configured distribution, regardless of how fast or slow the actual upstream is.
+The distribution sets a target response-header latency. Observed latency is at least the larger of the upstream latency and target latency, plus scheduling and network overhead.
 
 For matched requests, the filter reads a process-global, atomically synchronized in-flight request
 counter when request headers are processed and uses that request-entry value for load-based
@@ -404,39 +437,44 @@ workers as threads in one process, so the counter is shared across workers.
 ### Status Code Selection
 
 Each endpoint has one or more response entries with a `resolution` that serves as both:
-1. **Weight**: The probability of selecting that status code (proportional to total resolution)
-2. **Accuracy**: The number of pre-computed latency samples for that status code's distribution
+1. **Weight**: The per-request probability of selecting that status code, proportional to the sum of all resolutions
+2. **Latency sample count**: The number of precomputed latency samples for that status distribution in stateful mode
 
 For example, with `resolution: 900` for status 200 and `resolution: 100` for status 503:
-- 90% of requests will get a 200 response with latency from the 200 distribution
-- 10% of requests will get a 503 abort with latency from the 503 distribution
+- Each request has a 90% chance of selecting status 200 and a 10% chance of selecting status 503
+- The selected status is returned even when it differs from upstream
 
-This status code rewriting assumes that the upstream responses are always "good" (e.g. 200) responses and will overwrite them with one of the  bad responses (e.g. 503). 
+The configured distribution determines the returned status even when the upstream status differs.
 
 ### Latency Distribution
 
 The stateful probability distribution is inspired by [distribution-calculator](https://github.com/spockz/distribution-calculator). Given a set of percentiles, it:
 
-1. Pre-computes exactly `resolution` samples by interpolating between percentile boundaries
+1. Precomputes latency samples based on `resolution` by interpolating between percentile boundaries
 2. Shuffles and serves them in random order
-3. Over a full cycle of `resolution` requests, the actual percentile distribution exactly matches the configured one
+3. The samples approximate the configured percentiles; status selection remains independently weighted-random, and observed latency cannot be lower than upstream latency
 
 ### Load-Based Behavior
 
 When `load_based` is configured, the process-global active-request count is
-passed as the current load value:
-- Below `healthy.threshold_rps`: Uses the healthy response distribution
-- Above `tipping_point.threshold_rps`: Uses the tipping point distribution
+passed as the current load value. `threshold_in_flight` is the number of matched
+requests in flight, not a request rate.
+
+- At or below `healthy.threshold_in_flight`: Uses the healthy response distribution
+- At or above `tipping_point.threshold_in_flight`: Uses the tipping point distribution
 - Between the two (**grey zone**): Probabilistically mixes between healthy and tipping based on position, with optional penalty
 
 ### Grey Zone Transitions
 
 In the grey zone, the filter:
-1. Calculates position as `(currentRPS - healthyRPS) / (tippingRPS - healthyRPS)` (0.0 to 1.0)
+1. Calculates position as `(currentInFlight - healthyThreshold) / (tippingThreshold - healthyThreshold)` (0.0 to 1.0)
 2. Selects healthy or tipping distribution proportionally to position
 3. Adds a base latency penalty scaled by position
-4. If position exceeds `spike_threshold`, applies the spike multiplier for `spike_penalty_duration`
-5. Decays the spike penalty at `recovery_rate` when position drops below threshold
+4. While position is at or above `spike_threshold`, keeps the spike multiplier active
+5. Starts recovery on the first observed drop below the threshold. For `spike_penalty_duration`, the penalty is `basePenalty * spike_penalty_multiplier * (1 - elapsed / spike_penalty_duration * recovery_rate)`, then returns to the base penalty. A renewed spike resets recovery
+
+Spike state follows load observations in every tier. The tipping tier sustains a spike;
+the healthy tier starts or advances recovery. Additional penalties apply only in the grey zone.
 
 ## Response Headers
 
@@ -449,7 +487,7 @@ The filter adds response headers to indicate what was injected:
 | `x-fault-added-delay` | Additional delay injected (target - upstream), or `0s` when none was added |
 | `x-fault-requests-in-flight` | Process-global in-flight matched request count observed at request entry, before the request is added |
 | `x-fault-worker-index` | Envoy worker index that made the fault decision; only included when `diagnostic` is `true` |
-| `x-fault-injected` | Set to "abort" when a non-2xx status was injected |
+| `x-fault-injected` | Set to "response" when a sampled status below 400 overrides upstream, or "abort" for sampled statuses 400 and above |
 | `x-fault-status` | The status code selected by the distribution |
 
 ### Multi-worker active request test
@@ -474,7 +512,7 @@ memory, and concurrency characteristics. The benchmark sources in
 `internal/fault/performance_bench_test.go`, and `performance/` reproduce the
 measurements below.
 
-Use `stateful` when CPU efficiency and exact finite-cycle duration behavior are
+Use `stateful` when CPU efficiency and precomputed latency samples are
 important; it remains the default. Use `stateless` for high-concurrency,
 throughput-sensitive configurations where lower contention, tail latency, and
 resolution-independent memory matter more, accepting higher CPU use. Load-based
@@ -650,7 +688,7 @@ latency: it avoids a cross-worker serialization point and avoids
 resolution-proportional resident memory and startup work. It also consumes much
 more CPU in the saturated runner because every request performs crypto-random
 duration sampling and interpolation. `stateful` remains the better choice when
-CPU efficiency and exact finite-cycle duration behavior are important. The
+CPU efficiency and precomputed latency samples are important. The
 measurements therefore do not justify changing the public default on performance
 alone; keep `stateful` as the default and document `stateless` for
 throughput-sensitive configurations. No production change is applied by this

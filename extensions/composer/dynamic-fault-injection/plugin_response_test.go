@@ -134,21 +134,28 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	t.Cleanup(func() { activeRequests.Store(0) })
 	scheduler := newResponseTestScheduler()
 	handle.EXPECT().GetScheduler().Return(scheduler)
+	responseBody := `{"type":"about:blank","title":"Unavailable"}`
 
 	var localResponseHeaders [][2]string
 	handle.EXPECT().SendLocalResponse(
 		uint32(503),
 		gomock.Any(),
-		[]byte("fault filter abort: 503\n"),
+		[]byte(responseBody),
 		"fault_abort",
 	).Do(func(_ uint32, headers [][2]string, _ []byte, _ string) {
 		localResponseHeaders = headers
 	})
 
 	filter := &latencyFaultFilter{
-		handle:               handle,
-		matched:              true,
-		sample:               fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond},
+		handle:  handle,
+		matched: true,
+		sample: fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond, LocalResponse: &fault.LocalResponseConfig{
+			Body: &responseBody,
+			Headers: []fault.LocalResponseHeader{
+				{Name: "Content-Type", Value: "application/problem+json"},
+				{Name: "Retry-After", Value: "2"},
+			},
+		}},
 		requestEntryInFlight: 7,
 		requestStart:         time.Now(),
 	}
@@ -157,7 +164,8 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	status := filter.OnResponseHeaders(headers, false)
 	require.Equal(t, shared.HeadersStatusStopAllAndBuffer, status)
 	scheduler.Wait(t)
-	requireResponseHeader(t, localResponseHeaders, "Content-Type", "text/plain")
+	requireResponseHeader(t, localResponseHeaders, "content-type", "application/problem+json")
+	requireResponseHeader(t, localResponseHeaders, "retry-after", "2")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-injected", "abort")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-injected-delay", "100ms")
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-actual-upstream")
@@ -200,6 +208,24 @@ func TestOnResponseHeaders_ImmediateAbort(t *testing.T) {
 	requireResponseHeaderMissing(t, localResponseHeaders, "x-fault-added-delay")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-status", "500")
 	requireResponseHeader(t, localResponseHeaders, requestsInFlightHeader, "8")
+}
+
+func TestOnResponseHeaders_ExplicitEmptyErrorBody(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	empty := ""
+	handle.EXPECT().SendLocalResponse(uint32(503), gomock.Any(), []byte{}, "fault_abort")
+	filter := &latencyFaultFilter{
+		handle:  handle,
+		matched: true,
+		sample: fault.ResponseSample{Status: 503, Duration: time.Millisecond, LocalResponse: &fault.LocalResponseConfig{
+			Body: &empty,
+		}},
+		requestStart: time.Now().Add(-10 * time.Millisecond),
+	}
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
+	require.Equal(t, shared.HeadersStatusStop, filter.OnResponseHeaders(headers, false))
 }
 
 func TestOnResponseHeaders_DelaysExpectedResponse(t *testing.T) {
@@ -257,28 +283,70 @@ func TestOnResponseHeaders_ExpectedResponseNeedsNoDelay(t *testing.T) {
 	require.Equal(t, "4", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 }
 
-func TestOnResponseHeaders_UnconfiguredStatusPassesThrough(t *testing.T) {
+func TestOnResponseHeaders_SampledSuccessOverridesUpstreamError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
-	activeRequests.Store(99)
-	t.Cleanup(func() { activeRequests.Store(0) })
+	body := `{"error":"unavailable"}`
+	localResponse := &fault.LocalResponseConfig{
+		Body: &body,
+		Headers: []fault.LocalResponseHeader{
+			{Name: "Content-Type", Value: "application/json"},
+			{Name: "Set-Cookie", Value: "first=1"},
+			{Name: "Set-Cookie", Value: "second=2"},
+		},
+	}
+	var gotHeaders [][2]string
+	handle.EXPECT().SendLocalResponse(uint32(200), gomock.Any(), []byte(body), "fault_response").Do(
+		func(_ uint32, headers [][2]string, _ []byte, _ string) { gotHeaders = headers },
+	)
 	filter := &latencyFaultFilter{
 		handle:               handle,
 		matched:              true,
-		sample:               fault.ResponseSample{Status: 200, Duration: 100 * time.Millisecond},
+		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond, LocalResponse: localResponse},
 		requestEntryInFlight: 6,
-		requestStart:         time.Now(),
+		requestStart:         time.Now().Add(-10 * time.Millisecond),
 	}
-	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"404"}})
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"500"}})
 
 	status := filter.OnResponseHeaders(headers, false)
-	require.Equal(t, shared.HeadersStatusContinue, status)
-	require.Equal(t, "0s", headers.GetOne("x-fault-injected-delay").ToUnsafeString())
-	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
-	require.Equal(t, "0s", headers.GetOne("x-fault-added-delay").ToUnsafeString())
-	require.Equal(t, "404", headers.GetOne("x-fault-status").ToUnsafeString())
-	require.Equal(t, "6", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
+	require.Equal(t, shared.HeadersStatusStop, status)
+	requireResponseHeader(t, gotHeaders, "content-type", "application/json")
+	requireResponseHeader(t, gotHeaders, injectedHeader, "response")
+	requireResponseHeader(t, gotHeaders, injectedDelayHeader, "1ms")
+	requireResponseHeader(t, gotHeaders, statusHeader, "200")
+	requireResponseHeader(t, gotHeaders, requestsInFlightHeader, "6")
+	requireResponseHeaderPresent(t, gotHeaders, actualUpstreamHeader)
+	requireHeaderCount(t, gotHeaders, "set-cookie", 2)
+	require.Equal(t, []string{"first=1", "second=2"}, headerValues(gotHeaders, "set-cookie"))
+}
+
+func headerValues(headers [][2]string, name string) []string {
+	values := make([]string, 0)
+	for _, header := range headers {
+		if header[0] == name {
+			values = append(values, header[1])
+		}
+	}
+	return values
+}
+
+func TestOnResponseHeaders_DelaysAndForcesBodylessSuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
+	scheduler := newResponseTestScheduler()
+	handle.EXPECT().GetScheduler().Return(scheduler)
+	handle.EXPECT().SendLocalResponse(uint32(204), gomock.Any(), []byte{}, "fault_response")
+	filter := &latencyFaultFilter{
+		handle:       handle,
+		matched:      true,
+		sample:       fault.ResponseSample{Status: 204, Duration: 60 * time.Millisecond},
+		requestStart: time.Now(),
+	}
+	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"200"}})
+	require.Equal(t, shared.HeadersStatusStopAllAndBuffer, filter.OnResponseHeaders(headers, false))
+	scheduler.Wait(t)
 }
 
 func TestOnResponseHeaders_DiagnosticIncludesWorkerIndex(t *testing.T) {
