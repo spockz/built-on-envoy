@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 }
 
 func runSampling(mode string) {
-	dist, err := fault.NewResponseDistributionWithMode([]fault.StatusDistribution{{
+	dist, err := fault.NewResponseDistributionWithMode([]config.StatusDistribution{{
 		Status:       200,
 		Resolution:   1000,
 		Distribution: map[string]string{"p0.0": "1ms", "p50.0": "10ms", "p100.0": "100ms"},

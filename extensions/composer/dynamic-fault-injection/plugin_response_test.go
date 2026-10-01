@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
@@ -154,9 +155,9 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	filter := &latencyFaultFilter{
 		handle:  handle,
 		matched: true,
-		sample: fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond, LocalResponse: &fault.LocalResponseConfig{
+		sample: fault.ResponseSample{Status: 503, Duration: 100 * time.Millisecond, LocalResponse: &config.LocalResponseConfig{
 			Body: &responseBody,
-			Headers: []fault.LocalResponseHeader{
+			Headers: []config.LocalResponseHeader{
 				{Name: "Content-Type", Value: "application/problem+json"},
 				{Name: "Retry-After", Value: "2"},
 			},
@@ -226,7 +227,7 @@ func TestOnResponseHeaders_ExplicitEmptyErrorBody(t *testing.T) {
 	filter := &latencyFaultFilter{
 		handle:  handle,
 		matched: true,
-		sample: fault.ResponseSample{Status: 503, Duration: time.Millisecond, LocalResponse: &fault.LocalResponseConfig{
+		sample: fault.ResponseSample{Status: 503, Duration: time.Millisecond, LocalResponse: &config.LocalResponseConfig{
 			Body: &empty,
 		}},
 		requestStart: time.Now().Add(-10 * time.Millisecond),
@@ -310,9 +311,9 @@ func TestOnResponseHeaders_SampledSuccessOverridesUpstreamError(t *testing.T) {
 			tags := make(map[string]string)
 			span.EXPECT().SetTag(gomock.Any(), gomock.Any()).Do(func(name, value string) { tags[name] = value }).AnyTimes()
 			body := `{"error":"unavailable"}`
-			localResponse := &fault.LocalResponseConfig{
+			localResponse := &config.LocalResponseConfig{
 				Body: &body,
-				Headers: []fault.LocalResponseHeader{
+				Headers: []config.LocalResponseHeader{
 					{Name: "Content-Type", Value: "application/json"},
 					{Name: "Set-Cookie", Value: "first=1"},
 					{Name: "Set-Cookie", Value: "second=2"},
@@ -391,7 +392,7 @@ func TestOnResponseHeaders_DiagnosticIncludesWorkerIndex(t *testing.T) {
 
 	filter := &latencyFaultFilter{
 		handle:               handle,
-		factory:              &latencyFaultFilterFactory{config: &fault.FilterConfig{Diagnostic: true}},
+		factory:              &latencyFaultFilterFactory{config: &config.FilterConfig{Diagnostic: true}},
 		matched:              true,
 		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond},
 		requestEntryInFlight: 5,
@@ -412,7 +413,7 @@ func TestOnResponseHeaders_NonDiagnosticOmitsWorkerIndex(t *testing.T) {
 
 	filter := &latencyFaultFilter{
 		handle:               handle,
-		factory:              &latencyFaultFilterFactory{config: &fault.FilterConfig{}},
+		factory:              &latencyFaultFilterFactory{config: &config.FilterConfig{}},
 		matched:              true,
 		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond},
 		requestEntryInFlight: 10,

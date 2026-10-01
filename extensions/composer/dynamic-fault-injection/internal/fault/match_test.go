@@ -5,7 +5,11 @@
 
 package fault
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
+)
 
 // mockHeaderGetter is a simple mock for HeaderGetter used in tests.
 type mockHeaderGetter struct {
@@ -17,7 +21,7 @@ func (m *mockHeaderGetter) GetOne(name string) string {
 }
 
 func TestMatchRoute_PrefixMatch(t *testing.T) {
-	match := MatchConfig{Prefix: "/api/"}
+	match := config.MatchConfig{Prefix: "/api/"}
 	headers := &mockHeaderGetter{headers: map[string]string{}}
 
 	if !MatchRoute(match, "/api/users", headers) {
@@ -32,7 +36,7 @@ func TestMatchRoute_PrefixMatch(t *testing.T) {
 }
 
 func TestMatchRoute_ExactMatch(t *testing.T) {
-	match := MatchConfig{Exact: "/health"}
+	match := config.MatchConfig{Exact: "/health"}
 	headers := &mockHeaderGetter{headers: map[string]string{}}
 
 	if !MatchRoute(match, "/health", headers) {
@@ -44,7 +48,7 @@ func TestMatchRoute_ExactMatch(t *testing.T) {
 }
 
 func TestMatchRoute_ExactMatchStripsQueryString(t *testing.T) {
-	match := MatchConfig{Exact: "/health"}
+	match := config.MatchConfig{Exact: "/health"}
 	headers := &mockHeaderGetter{headers: map[string]string{}}
 
 	if !MatchRoute(match, "/health?foo=bar", headers) {
@@ -53,8 +57,8 @@ func TestMatchRoute_ExactMatchStripsQueryString(t *testing.T) {
 }
 
 func TestMatchRoute_HeaderExactMatch(t *testing.T) {
-	match := MatchConfig{
-		Headers: []HeaderMatchConfig{
+	match := config.MatchConfig{
+		Headers: []config.HeaderMatchConfig{
 			{Name: "x-env", ExactMatch: "staging"},
 		},
 	}
@@ -76,8 +80,8 @@ func TestMatchRoute_HeaderExactMatch(t *testing.T) {
 }
 
 func TestMatchRoute_HeaderPresentMatch(t *testing.T) {
-	match := MatchConfig{
-		Headers: []HeaderMatchConfig{
+	match := config.MatchConfig{
+		Headers: []config.HeaderMatchConfig{
 			{Name: "x-debug", PresentMatch: true},
 		},
 	}
@@ -94,9 +98,9 @@ func TestMatchRoute_HeaderPresentMatch(t *testing.T) {
 }
 
 func TestMatchRoute_CombinedPrefixAndHeaders(t *testing.T) {
-	match := MatchConfig{
+	match := config.MatchConfig{
 		Prefix: "/api/",
-		Headers: []HeaderMatchConfig{
+		Headers: []config.HeaderMatchConfig{
 			{Name: "x-version", ExactMatch: "v2"},
 		},
 	}
@@ -118,7 +122,7 @@ func TestMatchRoute_CombinedPrefixAndHeaders(t *testing.T) {
 }
 
 func TestMatchRoute_EmptyMatch(t *testing.T) {
-	match := MatchConfig{}
+	match := config.MatchConfig{}
 	headers := &mockHeaderGetter{headers: map[string]string{}}
 
 	if !MatchRoute(match, "/anything", headers) {

@@ -3,19 +3,22 @@
 // The full text of the Apache license is available in the LICENSE file at
 // the root of the repo.
 
-package fault
+// Configuration contract tests use the loader so schema and semantic validation
+// remain inseparable for both filter-level and per-route callers.
+
+package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/require"
 )
 
-// ToDo: Add errors.As or errors.Is assertions on actual error messages.
-
-func TestParseConfig_BasicEndpoint(t *testing.T) {
+func TestLoadConfig_BasicEndpoint(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -35,7 +38,7 @@ endpoints:
           p99.0: "500ms"
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -68,7 +71,7 @@ endpoints:
 	}
 }
 
-func TestParseConfig_ProbabilityDistributionStateless(t *testing.T) {
+func TestLoadConfig_ProbabilityDistributionStateless(t *testing.T) {
 	input := `
 probability_distribution: stateless
 endpoints:
@@ -82,7 +85,7 @@ endpoints:
           p100.0: "10ms"
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +95,7 @@ endpoints:
 	}
 }
 
-func TestParseConfig_Diagnostic(t *testing.T) {
+func TestLoadConfig_Diagnostic(t *testing.T) {
 	input := `
 diagnostic: true
 responses:
@@ -103,12 +106,12 @@ responses:
       p100.0: "10ms"
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	require.NoError(t, err)
 	require.True(t, cfg.Diagnostic)
 }
 
-func TestParseConfig_LocalResponse(t *testing.T) {
+func TestLoadConfig_LocalResponse(t *testing.T) {
 	valid := `responses:
   - status: 204
     resolution: 1
@@ -120,7 +123,7 @@ func TestParseConfig_LocalResponse(t *testing.T) {
         - {name: Set-Cookie, value: "b=2"}
         - {name: Content-Type, value: application/json}
 `
-	cfg, err := ParsePerRouteConfig([]byte(valid))
+	cfg, err := loadPerRouteConfig([]byte(valid))
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Responses[0].LocalResponse)
 	require.NotNil(t, cfg.Responses[0].LocalResponse.Body)
@@ -145,12 +148,12 @@ func TestParseConfig_LocalResponse(t *testing.T) {
 		strings.Replace(valid, `body: ""`, `body: content`, 1),
 		strings.Replace(valid, "status: 204", "status: 199", 1),
 	} {
-		_, err := ParsePerRouteConfig([]byte(input))
+		_, err := loadPerRouteConfig([]byte(input))
 		require.Error(t, err, "input: %s", input)
 	}
 }
 
-func TestParseConfig_LocalResponseNestedBehavior(t *testing.T) {
+func TestLoadConfig_LocalResponseNestedBehavior(t *testing.T) {
 	endpointConfig := `endpoints:
   - match: {prefix: /}
     responses:
@@ -159,7 +162,7 @@ func TestParseConfig_LocalResponseNestedBehavior(t *testing.T) {
         distribution: {p0.0: 1ms}
         local_response: {body: custom}
 `
-	cfg, err := ParseConfig([]byte(endpointConfig))
+	cfg, err := loadFilterConfig([]byte(endpointConfig))
 	require.NoError(t, err)
 	require.Equal(t, "custom", *cfg.Endpoints[0].Responses[0].LocalResponse.Body)
 
@@ -179,13 +182,13 @@ func TestParseConfig_LocalResponseNestedBehavior(t *testing.T) {
         distribution: {p0.0: 2ms}
         local_response: {body: tipping}
 `
-	cfg, err = ParseConfig([]byte(loadConfig))
+	cfg, err = loadFilterConfig([]byte(loadConfig))
 	require.NoError(t, err)
 	require.Equal(t, "healthy", *cfg.LoadBased.Healthy.Responses[0].LocalResponse.Body)
 	require.Equal(t, "tipping", *cfg.LoadBased.TippingPoint.Responses[0].LocalResponse.Body)
 }
 
-func TestParseConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
+func TestLoadConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
 	valid := `endpoints:
   - &endpoint
     match: {prefix: /one}
@@ -202,7 +205,7 @@ func TestParseConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
     match: {prefix: /two}
     responses: *responses
 `
-	cfg, err := ParseConfig([]byte(valid))
+	cfg, err := loadFilterConfig([]byte(valid))
 	require.NoError(t, err)
 	require.Len(t, cfg.Endpoints, 2)
 	require.Equal(t, cfg.Endpoints[0].Responses[0].LocalResponse.Headers[0].Value, *cfg.Endpoints[0].Responses[0].LocalResponse.Body)
@@ -216,7 +219,7 @@ func TestParseConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
       body: ""
       headers: []
 `
-	_, err = ParsePerRouteConfig([]byte(validOverride))
+	_, err = loadPerRouteConfig([]byte(validOverride))
 	require.NoError(t, err, "explicit fields must override invalid merged defaults")
 
 	for _, invalid := range []string{
@@ -230,12 +233,12 @@ func TestParseConfig_LocalResponseYAMLAliasesAndMerges(t *testing.T) {
     local_response: {headers: [{name: x-test, value: 1}]}
 `,
 	} {
-		_, err := ParsePerRouteConfig([]byte(invalid))
+		_, err := loadPerRouteConfig([]byte(invalid))
 		require.Error(t, err)
 	}
 }
 
-func TestParseConfig_InvalidProbabilityDistribution(t *testing.T) {
+func TestLoadConfig_InvalidProbabilityDistribution(t *testing.T) {
 	input := `
 probability_distribution: random
 endpoints:
@@ -249,13 +252,13 @@ endpoints:
           p100.0: "10ms"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error for invalid probability_distribution")
 	}
 }
 
-func TestParseConfig_LoadBased(t *testing.T) {
+func TestLoadConfig_LoadBased(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -293,7 +296,7 @@ endpoints:
         recovery_rate: 0.1
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -320,7 +323,7 @@ endpoints:
 	}
 }
 
-func TestParseConfig_ExactMatch(t *testing.T) {
+func TestLoadConfig_ExactMatch(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -334,7 +337,7 @@ endpoints:
           p99.0: "5ms"
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -344,7 +347,7 @@ endpoints:
 	}
 }
 
-func TestParseConfig_HeaderMatch(t *testing.T) {
+func TestLoadConfig_HeaderMatch(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -361,7 +364,7 @@ endpoints:
           p99.0: "100ms"
 `
 
-	cfg, err := ParseConfig([]byte(input))
+	cfg, err := loadFilterConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -378,27 +381,27 @@ endpoints:
 	}
 }
 
-func TestParseConfig_InvalidYAML(t *testing.T) {
-	_, err := ParseConfig([]byte("{{not yaml"))
+func TestLoadConfig_InvalidYAML(t *testing.T) {
+	_, err := loadFilterConfig([]byte("{{not yaml"))
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
 	}
 }
 
-func TestParseConfig_NoResponsesOrLoadBased(t *testing.T) {
+func TestLoadConfig_NoResponsesOrLoadBased(t *testing.T) {
 	input := `
 endpoints:
   - match:
       prefix: "/api/"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error when neither responses nor load_based is configured")
 	}
 }
 
-func TestParseConfig_InvalidStatusCode(t *testing.T) {
+func TestLoadConfig_InvalidStatusCode(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -411,68 +414,44 @@ endpoints:
           p50.0: "10ms"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error for invalid status code")
 	}
 }
 
-func TestParseConfig_MultipleValidationErrors(t *testing.T) {
+func TestLoadConfig_MultipleValidationErrors(t *testing.T) {
 	input := `
 endpoints:
   - match:
       prefix: "/api/"
     responses:
-      - status: 999
+      - status: 200
         resolution: 100
         distribution:
-          p0.0: "1ms"
+          pbad: "1ms"
           p50.0: "10ms"
   - match:
       prefix: "/otherAPI/"
     responses:
-     - status: 999
-       resolution: 0
+     - status: 200
+       resolution: 100
        distribution:
-         p0.0: "1ms"
+         pbad: "1ms"
          p50.0: "10ms"
 `
 
-	// We should see 3 errors.
-	// - Invalid status code for the /api/ prefix match
-	// - Invalid status code for the /otherAPI/ prefix match
-	// - Invalid resolution (0) for the /otherAPI/ prefix match
-	_, err := ParseConfig([]byte(input))
-
-	totalSumOfErrors := countErrorsRecursively(err)
-
-	require.Equal(t, 3, totalSumOfErrors)
-	if err == nil {
-		t.Fatal("expected error for invalid status code")
-	}
+	_, err := loadFilterConfig([]byte(input))
+	require.ErrorIs(t, err, strconv.ErrSyntax)
+	var numberErr *strconv.NumError
+	require.ErrorAs(t, err, &numberErr)
+	var schemaErr *jsonschema.ValidationError
+	require.NotErrorAs(t, err, &schemaErr)
+	require.ErrorContains(t, err, "endpoint 0")
+	require.ErrorContains(t, err, "endpoint 1")
 }
 
-func countErrorsRecursively(err error) int {
-	for {
-		switch x := err.(type) { //nolint:errorlint
-		case interface{ Unwrap() error }:
-			err = x.Unwrap()
-			if err == nil {
-				return 1
-			}
-		case interface{ Unwrap() []error }:
-			errorCount := 0
-			for _, err := range err.(interface{ Unwrap() []error }).Unwrap() {
-				errorCount += countErrorsRecursively(err)
-			}
-			return errorCount
-		default:
-			return 1
-		}
-	}
-}
-
-func TestParseConfig_ZeroResolution(t *testing.T) {
+func TestLoadConfig_ZeroResolution(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -485,13 +464,13 @@ endpoints:
           p50.0: "10ms"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error for zero resolution")
 	}
 }
 
-func TestParseConfig_LoadBased_MissingHealthy(t *testing.T) {
+func TestLoadConfig_LoadBased_MissingHealthy(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -508,13 +487,13 @@ endpoints:
               p99.0: "100ms"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error when load_based.healthy is missing")
 	}
 }
 
-func TestParseConfig_LoadBased_InvalidThresholds(t *testing.T) {
+func TestLoadConfig_LoadBased_InvalidThresholds(t *testing.T) {
 	input := `
 endpoints:
   - match:
@@ -540,7 +519,7 @@ endpoints:
               p99.0: "100ms"
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatal("expected error when tipping_point threshold is less than healthy threshold")
 	}
@@ -696,23 +675,22 @@ endpoints:
         recovery_rate: 0.1
 `
 
-	_, err := ParseConfig([]byte(input))
+	_, err := loadFilterConfig([]byte(input))
 	if err == nil {
 		t.Fatalf("unexpected successful load of config: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "either one") {
-		t.Fatalf("Expected config loading to fail with a message about the fields `responses` and `load_based` being mutually exclusive. %v", err)
-	}
+	var schemaErr *jsonschema.ValidationError
+	require.ErrorAs(t, err, &schemaErr)
 }
 
-func TestParseConfig_JSONFromStruct(t *testing.T) {
+func TestLoadConfig_JSONFromStruct(t *testing.T) {
 	// When using google.protobuf.Struct, Envoy serializes the config as JSON
 	// before passing it to the module. Verify that our YAML parser handles
 	// this correctly.
 	jsonInput := `{"endpoints":[{"match":{"prefix":"/api/"},"responses":[{"status":200,"resolution":900,"distribution":{"p0.0":"1ms","p50.0":"10ms","p100.0":"100ms"}},{"status":503,"resolution":100,"distribution":{"p0.0":"50ms","p100.0":"500ms"}}]}]}`
 
-	cfg, err := ParseConfig([]byte(jsonInput))
+	cfg, err := loadFilterConfig([]byte(jsonInput))
 	if err != nil {
 		t.Fatalf("unexpected error parsing JSON input: %v", err)
 	}
@@ -742,7 +720,7 @@ func TestParseConfig_JSONFromStruct(t *testing.T) {
 	}
 }
 
-func TestParseConfig_RejectsUnknownFields(t *testing.T) {
+func TestLoadConfig_RejectsUnknownFields(t *testing.T) {
 	for _, input := range []string{
 		`diagnostics: true`,
 		`endpoints: [{mach: {prefix: /api}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`,
@@ -750,16 +728,17 @@ func TestParseConfig_RejectsUnknownFields(t *testing.T) {
 		`responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}, extra: true}]`,
 	} {
 		t.Run(input, func(t *testing.T) {
-			for _, parse := range []func([]byte) (*FilterConfig, error){ParseConfig, ParsePerRouteConfig} {
+			for _, parse := range []func([]byte) (*FilterConfig, error){loadFilterConfig, loadPerRouteConfig} {
 				cfg, err := parse([]byte(input))
-				require.ErrorContains(t, err, "not found")
+				var schemaErr *jsonschema.ValidationError
+				require.ErrorAs(t, err, &schemaErr)
 				require.Nil(t, cfg)
 			}
 		})
 	}
 }
 
-func TestParseConfig_LoadBasedRequiresResponses(t *testing.T) {
+func TestLoadConfig_LoadBasedRequiresResponses(t *testing.T) {
 	for _, tier := range []string{"healthy", "tipping_point"} {
 		for _, empty := range []string{"", "responses: null", "responses: []"} {
 			t.Run(tier+"/"+empty, func(t *testing.T) {
@@ -771,9 +750,10 @@ func TestParseConfig_LoadBasedRequiresResponses(t *testing.T) {
 					tipping = empty
 				}
 				input := "load_based:\n  healthy:\n    threshold_in_flight: 10\n    " + healthy + "\n  tipping_point:\n    threshold_in_flight: 100\n    " + tipping + "\n"
-				for _, parse := range []func([]byte) (*FilterConfig, error){ParseConfig, ParsePerRouteConfig} {
+				for _, parse := range []func([]byte) (*FilterConfig, error){loadFilterConfig, loadPerRouteConfig} {
 					cfg, err := parse([]byte(input))
-					require.ErrorContains(t, err, "load_based."+tier+".responses must have at least one entry")
+					var schemaErr *jsonschema.ValidationError
+					require.ErrorAs(t, err, &schemaErr)
 					require.Nil(t, cfg)
 				}
 			})
@@ -781,8 +761,8 @@ func TestParseConfig_LoadBasedRequiresResponses(t *testing.T) {
 	}
 }
 
-func TestParseConfig_EmptyMatchIsCatchAll(t *testing.T) {
-	cfg, err := ParseConfig([]byte(`endpoints: [{match: {}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`))
+func TestLoadConfig_EmptyMatchIsPreserved(t *testing.T) {
+	cfg, err := loadFilterConfig([]byte(`endpoints: [{match: {}, responses: [{status: 200, resolution: 1, distribution: {p0.0: 1ms}}]}]`))
 	require.NoError(t, err)
-	require.True(t, MatchRoute(cfg.Endpoints[0].Match, "/any/path", nil))
+	require.Equal(t, MatchConfig{}, cfg.Endpoints[0].Match)
 }

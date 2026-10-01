@@ -12,7 +12,7 @@ import (
 
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared/fake"
 
-	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 )
 
 func BenchmarkActiveRequestTracking(b *testing.B) {
@@ -69,7 +69,7 @@ func BenchmarkResponseHeaderWrites(b *testing.B) {
 }
 
 func BenchmarkFactoryConstruction(b *testing.B) {
-	for _, mode := range []string{fault.ProbabilityDistributionStateful, fault.ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, endpointCount := range []int{1, 5, 10, 20} {
 			for _, resolution := range []int{10, 100, 1000, 10000, 100000, 1000000} {
 				b.Run(fmt.Sprintf("%s/endpoints=%d/resolution=%d", mode, endpointCount, resolution), func(b *testing.B) {
@@ -93,7 +93,7 @@ func BenchmarkFactoryConstruction(b *testing.B) {
 }
 
 func BenchmarkDirectSampling(b *testing.B) {
-	for _, mode := range []string{fault.ProbabilityDistributionStateful, fault.ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		b.Run(mode, func(b *testing.B) {
 			b.StopTimer()
 			factory, err := buildFilterFactory(benchmarkDirectFactoryConfig(mode))

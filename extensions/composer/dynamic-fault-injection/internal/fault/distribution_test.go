@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 )
 
 func TestProbabilityDistribution_Sample(t *testing.T) {
-	percentiles := []Percentile{
+	percentiles := []config.Percentile{
 		{Quantile: 0.0, Duration: 0},
 		{Quantile: 0.50, Duration: 10 * time.Millisecond},
 		{Quantile: 0.90, Duration: 50 * time.Millisecond},
@@ -46,7 +48,7 @@ func TestProbabilityDistribution_Sample(t *testing.T) {
 }
 
 func TestProbabilityDistribution_SampleWithValue(t *testing.T) {
-	percentiles := []Percentile{
+	percentiles := []config.Percentile{
 		{Quantile: 0.0, Duration: 0},
 		{Quantile: 0.50, Duration: 10 * time.Millisecond},
 		{Quantile: 1.0, Duration: 200 * time.Millisecond},
@@ -85,7 +87,7 @@ func TestProbabilityDistribution_SampleWithValue(t *testing.T) {
 }
 
 func TestStatefulProbabilityDistribution_Sample(t *testing.T) {
-	percentiles := []Percentile{
+	percentiles := []config.Percentile{
 		{Quantile: 0.0, Duration: 0},
 		{Quantile: 0.50, Duration: 10 * time.Millisecond},
 		{Quantile: 0.90, Duration: 50 * time.Millisecond},
@@ -117,7 +119,7 @@ func TestStatefulProbabilityDistribution_Sample(t *testing.T) {
 }
 
 func TestStatefulProbabilityDistribution_Reshuffle(t *testing.T) {
-	percentiles := []Percentile{
+	percentiles := []config.Percentile{
 		{Quantile: 0.0, Duration: 0},
 		{Quantile: 0.50, Duration: 10 * time.Millisecond},
 		{Quantile: 1.0, Duration: 100 * time.Millisecond},
@@ -136,7 +138,7 @@ func TestStatefulProbabilityDistribution_Reshuffle(t *testing.T) {
 }
 
 func TestResponseDistribution_StatusWeighting(t *testing.T) {
-	statusDists := []StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 900,
@@ -155,7 +157,7 @@ func TestResponseDistribution_StatusWeighting(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
+	rd, err := NewResponseDistributionWithMode(statusDists, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,12 +185,12 @@ func TestResponseDistribution_StatusWeighting(t *testing.T) {
 }
 
 func TestResponseDistribution_DuplicateStatusesKeepSelectedLocalResponse(t *testing.T) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		t.Run(mode, func(t *testing.T) {
 			firstBody, secondBody := "first", "second"
-			distributions := []StatusDistribution{
-				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "1ms", "p100.0": "2ms"}, LocalResponse: &LocalResponseConfig{Body: &firstBody}},
-				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "100ms", "p100.0": "200ms"}, LocalResponse: &LocalResponseConfig{Body: &secondBody}},
+			distributions := []config.StatusDistribution{
+				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "1ms", "p100.0": "2ms"}, LocalResponse: &config.LocalResponseConfig{Body: &firstBody}},
+				{Status: 503, Resolution: 100, Distribution: map[string]string{"p0.0": "100ms", "p100.0": "200ms"}, LocalResponse: &config.LocalResponseConfig{Body: &secondBody}},
 			}
 			distribution, err := NewResponseDistributionWithMode(distributions, mode)
 			require.NoError(t, err)
@@ -213,7 +215,7 @@ func TestResponseDistribution_DuplicateStatusesKeepSelectedLocalResponse(t *test
 }
 
 func TestResponseDistribution_DurationRanges(t *testing.T) {
-	statusDists := []StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 1000,
@@ -225,7 +227,7 @@ func TestResponseDistribution_DurationRanges(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
+	rd, err := NewResponseDistributionWithMode(statusDists, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,7 +246,7 @@ func TestResponseDistribution_DurationRanges(t *testing.T) {
 
 func TestResponseDistribution_FlatDistribution(t *testing.T) {
 	// A flat distribution where all percentiles have the same value.
-	statusDists := []StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 100,
@@ -255,7 +257,7 @@ func TestResponseDistribution_FlatDistribution(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateful)
+	rd, err := NewResponseDistributionWithMode(statusDists, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -270,7 +272,7 @@ func TestResponseDistribution_FlatDistribution(t *testing.T) {
 }
 
 func TestResponseDistribution_StatelessMode(t *testing.T) {
-	statusDists := []StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 100,
@@ -281,7 +283,7 @@ func TestResponseDistribution_StatelessMode(t *testing.T) {
 		},
 	}
 
-	rd, err := NewResponseDistributionWithMode(statusDists, ProbabilityDistributionStateless)
+	rd, err := NewResponseDistributionWithMode(statusDists, config.ProbabilityDistributionStateless)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -295,7 +297,7 @@ func TestResponseDistribution_StatelessMode(t *testing.T) {
 }
 
 func TestResponseDistribution_InvalidMode(t *testing.T) {
-	statusDists := []StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 100,
@@ -313,7 +315,7 @@ func TestResponseDistribution_InvalidMode(t *testing.T) {
 }
 
 func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
-	healthyDists := []StatusDistribution{
+	healthyDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 1000,
@@ -323,7 +325,7 @@ func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 			},
 		},
 	}
-	tippingDists := []StatusDistribution{
+	tippingDists := []config.StatusDistribution{
 		{
 			Status:     503,
 			Resolution: 1000,
@@ -334,7 +336,7 @@ func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,16 +356,16 @@ func TestLoadBasedResponseDistribution_Healthy(t *testing.T) {
 
 func TestLoadBasedResponseDistribution_CarriesTierLocalResponse(t *testing.T) {
 	healthyBody, tippingBody := "healthy", "tipping"
-	healthy := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}, LocalResponse: &LocalResponseConfig{Body: &healthyBody}}}
-	tipping := []StatusDistribution{{Status: 503, Resolution: 1, Distribution: map[string]string{"p0.0": "10ms"}, LocalResponse: &LocalResponseConfig{Body: &tippingBody}}}
-	distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 20, nil, ProbabilityDistributionStateful)
+	healthy := []config.StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}, LocalResponse: &config.LocalResponseConfig{Body: &healthyBody}}}
+	tipping := []config.StatusDistribution{{Status: 503, Resolution: 1, Distribution: map[string]string{"p0.0": "10ms"}, LocalResponse: &config.LocalResponseConfig{Body: &tippingBody}}}
+	distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 20, nil, config.ProbabilityDistributionStateful)
 	require.NoError(t, err)
 	require.Equal(t, "healthy", *distribution.Sample(5).LocalResponse.Body)
 	require.Equal(t, "tipping", *distribution.Sample(25).LocalResponse.Body)
 }
 
 func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
-	healthyDists := []StatusDistribution{
+	healthyDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 1000,
@@ -373,7 +375,7 @@ func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
 			},
 		},
 	}
-	tippingDists := []StatusDistribution{
+	tippingDists := []config.StatusDistribution{
 		{
 			Status:     503,
 			Resolution: 1000,
@@ -384,7 +386,7 @@ func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -400,7 +402,7 @@ func TestLoadBasedResponseDistribution_TippingPoint(t *testing.T) {
 }
 
 func TestLoadBasedResponseDistribution_GreyZone(t *testing.T) {
-	healthyDists := []StatusDistribution{
+	healthyDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 1000,
@@ -410,7 +412,7 @@ func TestLoadBasedResponseDistribution_GreyZone(t *testing.T) {
 			},
 		},
 	}
-	tippingDists := []StatusDistribution{
+	tippingDists := []config.StatusDistribution{
 		{
 			Status:     503,
 			Resolution: 1000,
@@ -421,7 +423,7 @@ func TestLoadBasedResponseDistribution_GreyZone(t *testing.T) {
 		},
 	}
 
-	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, ProbabilityDistributionStateful)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, nil, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -452,7 +454,7 @@ func TestLoadBasedResponseDistribution_GreyZone(t *testing.T) {
 }
 
 func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
-	healthyDists := []StatusDistribution{
+	healthyDists := []config.StatusDistribution{
 		{
 			Status:     200,
 			Resolution: 1000,
@@ -462,7 +464,7 @@ func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
 			},
 		},
 	}
-	tippingDists := []StatusDistribution{
+	tippingDists := []config.StatusDistribution{
 		{
 			Status:     503,
 			Resolution: 1000,
@@ -473,7 +475,7 @@ func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
 		},
 	}
 
-	gz := &GreyZoneConfig{
+	gz := &config.GreyZoneConfig{
 		PenaltyBase:            "20ms",
 		SpikeThreshold:         0.8,
 		SpikePenaltyDuration:   "2s",
@@ -481,7 +483,7 @@ func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
 		RecoveryRate:           0.5,
 	}
 
-	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, gz, ProbabilityDistributionStateful)
+	lb, err := NewLoadBasedResponseDistributionWithMode(healthyDists, 100, tippingDists, 500, gz, config.ProbabilityDistributionStateful)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -507,7 +509,7 @@ func TestLoadBasedResponseDistribution_GreyZoneWithPenalty(t *testing.T) {
 }
 
 func TestProbabilityDistribution_AllSamplesPositive(t *testing.T) {
-	percentiles := []Percentile{
+	percentiles := []config.Percentile{
 		{Quantile: 0.0, Duration: 0},
 		{Quantile: 0.50, Duration: 5 * time.Millisecond},
 		{Quantile: 1.0, Duration: 500 * time.Millisecond},
@@ -546,20 +548,20 @@ func assertWithinTolerance(t *testing.T, name string, actual, expected time.Dura
 }
 
 func TestResponseDistribution_RejectsEmptyStatuses(t *testing.T) {
-	for _, statuses := range [][]StatusDistribution{nil, {}} {
-		for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, statuses := range [][]config.StatusDistribution{nil, {}} {
+		for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 			distribution, err := NewResponseDistributionWithMode(statuses, mode)
 			require.ErrorContains(t, err, "at least one status entry")
 			require.Nil(t, distribution)
 		}
-		distribution, err := NewResponseDistributionWithMode(statuses, ProbabilityDistributionStateful)
+		distribution, err := NewResponseDistributionWithMode(statuses, config.ProbabilityDistributionStateful)
 		require.Error(t, err)
 		require.Nil(t, distribution)
 	}
 }
 
 func TestLoadBasedResponseDistribution_RejectsEmptyTier(t *testing.T) {
-	valid := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}}}
+	valid := []config.StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "1ms"}}}
 	for _, healthyEmpty := range []bool{true, false} {
 		healthy, tipping := valid, valid
 		if healthyEmpty {
@@ -567,10 +569,10 @@ func TestLoadBasedResponseDistribution_RejectsEmptyTier(t *testing.T) {
 		} else {
 			tipping = nil
 		}
-		distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 100, nil, ProbabilityDistributionStateful)
+		distribution, err := NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 100, nil, config.ProbabilityDistributionStateful)
 		require.ErrorContains(t, err, "at least one status entry")
 		require.Nil(t, distribution)
-		for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+		for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 			distribution, err = NewLoadBasedResponseDistributionWithMode(healthy, 10, tipping, 100, nil, mode)
 			require.ErrorContains(t, err, "at least one status entry")
 			require.Nil(t, distribution)
@@ -584,7 +586,7 @@ func TestLoadBasedResponseDistribution_SustainedSpikeAndRecovery(t *testing.T) {
 		load    float64
 		penalty time.Duration
 	}
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, scenario := range []struct {
 			name  string
 			steps []step
@@ -621,8 +623,8 @@ func TestLoadBasedResponseDistribution_SustainedSpikeAndRecovery(t *testing.T) {
 			}},
 		} {
 			t.Run(mode+"/"+scenario.name, func(t *testing.T) {
-				responses := []StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "0s", "p100.0": "0s"}}}
-				distribution, err := NewLoadBasedResponseDistributionWithMode(responses, 100, responses, 200, &GreyZoneConfig{
+				responses := []config.StatusDistribution{{Status: 200, Resolution: 1, Distribution: map[string]string{"p0.0": "0s", "p100.0": "0s"}}}
+				distribution, err := NewLoadBasedResponseDistributionWithMode(responses, 100, responses, 200, &config.GreyZoneConfig{
 					PenaltyBase: "100ms", SpikeThreshold: 0.8, SpikePenaltyDuration: "2s", SpikePenaltyMultiplier: 3, RecoveryRate: 0.5,
 				}, mode)
 				require.NoError(t, err)

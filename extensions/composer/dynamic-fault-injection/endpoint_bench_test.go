@@ -11,11 +11,12 @@ import (
 
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared/fake"
 
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
 func BenchmarkEndpointMatchedSampling(b *testing.B) {
-	for _, mode := range []string{fault.ProbabilityDistributionStateful, fault.ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, endpointCount := range []int{1, 20} {
 			b.Run(fmt.Sprintf("%s/endpoints=%d", mode, endpointCount), func(b *testing.B) {
 				b.StopTimer()

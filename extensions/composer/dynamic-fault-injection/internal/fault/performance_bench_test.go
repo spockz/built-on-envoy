@@ -9,13 +9,15 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 )
 
-func benchmarkPercentiles(count int) []Percentile {
-	percentiles := make([]Percentile, 0, count)
+func benchmarkPercentiles(count int) []config.Percentile {
+	percentiles := make([]config.Percentile, 0, count)
 	for i := 0; i < count; i++ {
 		q := float64(i) / float64(count-1)
-		percentiles = append(percentiles, Percentile{
+		percentiles = append(percentiles, config.Percentile{
 			Quantile: q,
 			Duration: time.Duration(float64(time.Second) * (0.001 + q*q)),
 		})
@@ -23,20 +25,20 @@ func benchmarkPercentiles(count int) []Percentile {
 	return percentiles
 }
 
-func benchmarkStatusDistributions(resolution, percentileCount int) []StatusDistribution {
+func benchmarkStatusDistributions(resolution, percentileCount int) []config.StatusDistribution {
 	percentiles := benchmarkPercentiles(percentileCount)
 	distribution := make(map[string]string, len(percentiles))
 	for _, p := range percentiles {
 		distribution[fmt.Sprintf("p%.1f", p.Quantile*100)] = p.Duration.String()
 	}
-	return []StatusDistribution{
+	return []config.StatusDistribution{
 		{Status: 200, Resolution: resolution, Distribution: distribution},
 		{Status: 503, Resolution: max(resolution/10, 1), Distribution: distribution},
 	}
 }
 
 func BenchmarkDurationSample(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, resolution := range []int{10, 100, 1000, 10000} {
 			for _, percentileCount := range []int{2, 5, 10} {
 				name := fmt.Sprintf("%s/resolution=%d/percentiles=%d", mode, resolution, percentileCount)
@@ -57,7 +59,7 @@ func BenchmarkDurationSample(b *testing.B) {
 }
 
 func BenchmarkDurationSampleParallel(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		b.Run(mode+"/resolution=1000/percentiles=5", func(b *testing.B) {
 			b.StopTimer()
 			dist, err := newDurationDistribution(benchmarkPercentiles(5), 1000, mode)
@@ -80,7 +82,7 @@ func BenchmarkDurationSampleParallel(b *testing.B) {
 // warm-up cycle is outside the timer so the timed stateful cycle includes the
 // periodic reshuffle that follows it.
 func BenchmarkDurationSampleCycle(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, resolution := range []int{100000, 1000000} {
 			b.Run(fmt.Sprintf("%s/resolution=%d", mode, resolution), func(b *testing.B) {
 				dist, err := newDurationDistribution(benchmarkPercentiles(5), resolution, mode)
@@ -104,7 +106,7 @@ func BenchmarkDurationSampleCycle(b *testing.B) {
 }
 
 func BenchmarkResponseSampleParallel(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, resolution := range []int{10, 100, 1000, 10000} {
 			b.Run(fmt.Sprintf("%s/resolution=%d/percentiles=5", mode, resolution), func(b *testing.B) {
 				b.StopTimer()
@@ -125,7 +127,7 @@ func BenchmarkResponseSampleParallel(b *testing.B) {
 }
 
 func BenchmarkLoadBasedSampleParallel(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, load := range []struct {
 			name    string
 			rps     float64
@@ -139,9 +141,9 @@ func BenchmarkLoadBasedSampleParallel(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/%s", mode, load.name), func(b *testing.B) {
 				b.StopTimer()
 				dists := benchmarkStatusDistributions(1000, 5)
-				var greyZone *GreyZoneConfig
+				var greyZone *config.GreyZoneConfig
 				if load.penalty {
-					greyZone = &GreyZoneConfig{
+					greyZone = &config.GreyZoneConfig{
 						PenaltyBase:            "10ms",
 						SpikeThreshold:         0.5,
 						SpikePenaltyDuration:   "5s",
@@ -166,7 +168,7 @@ func BenchmarkLoadBasedSampleParallel(b *testing.B) {
 }
 
 func BenchmarkDistributionConstruction(b *testing.B) {
-	for _, mode := range []string{ProbabilityDistributionStateful, ProbabilityDistributionStateless} {
+	for _, mode := range []string{config.ProbabilityDistributionStateful, config.ProbabilityDistributionStateless} {
 		for _, resolution := range []int{1, 10, 100, 1000, 10000, 100000, 1000000} {
 			b.Run(fmt.Sprintf("%s/resolution=%d", mode, resolution), func(b *testing.B) {
 				b.StopTimer()

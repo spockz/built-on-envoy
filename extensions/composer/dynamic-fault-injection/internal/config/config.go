@@ -3,14 +3,15 @@
 // The full text of the Apache license is available in the LICENSE file at
 // the root of the repo.
 
-package fault
+// Configuration types and semantic checks live together because schema rules
+// cannot express all relationships between load thresholds and latency values.
+
+package config
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,20 +28,20 @@ type FilterConfig struct {
 	LoadBased               *LoadBasedConfig     `yaml:"load_based,omitempty"`
 }
 
-// ConfigSource identifies where a configuration was supplied.
-type ConfigSource int
+// Source identifies where a configuration was supplied.
+type Source int
 
 const (
-	// FilterConfigSource identifies filter-level configuration.
-	FilterConfigSource ConfigSource = iota
-	// PerRouteConfigSource identifies configuration attached to an Envoy route.
-	PerRouteConfigSource
+	// FilterSource identifies filter-level configuration.
+	FilterSource Source = iota
+	// PerRouteSource identifies configuration attached to an Envoy route.
+	PerRouteSource
 )
 
 const (
-	// ProbabilityDistributionStateful uses StatefulProbabilityDistribution.
+	// ProbabilityDistributionStateful selects precomputed latency samples.
 	ProbabilityDistributionStateful = "stateful"
-	// ProbabilityDistributionStateless uses ProbabilityDistribution.
+	// ProbabilityDistributionStateless selects independent latency samples.
 	ProbabilityDistributionStateless = "stateless"
 )
 
@@ -95,31 +96,12 @@ type GreyZoneConfig struct {
 	RecoveryRate           float64 `yaml:"recovery_rate"`
 }
 
-// ParseConfig parses a filter configuration into a FilterConfig.
-// Accepts both YAML and JSON input. When using google.protobuf.Struct as the
-// filter_config type in Envoy, the config is received as JSON (which is valid YAML).
-func ParseConfig(data []byte) (*FilterConfig, error) {
-	return parseConfig(data, FilterConfigSource)
-}
-
-// ParsePerRouteConfig parses direct behavior configuration for an Envoy route.
-// Route matching belongs to Envoy, so endpoint selectors are not accepted.
-func ParsePerRouteConfig(data []byte) (*FilterConfig, error) {
-	return parseConfig(data, PerRouteConfigSource)
-}
-
-func parseConfig(data []byte, source ConfigSource) (*FilterConfig, error) {
+func parseConfig(data []byte, source Source) (*FilterConfig, error) {
 	var cfg FilterConfig
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse filter config: %w", err)
-	}
-	if err := validateLocalResponseNodes(data); err != nil {
-		return nil, fmt.Errorf("failed to parse filter config: %w", err)
-	}
-	if source == PerRouteConfigSource && hasTopLevelKey(data, "endpoints") {
-		return nil, fmt.Errorf("endpoints cannot be used in per-route configuration; configure matching in Envoy routes")
 	}
 
 	// Default to stateful sampling when not explicitly configured.
@@ -133,7 +115,7 @@ func parseConfig(data []byte, source ConfigSource) (*FilterConfig, error) {
 		validationErrors = append(validationErrors, fmt.Errorf("probability_distribution must be one of %q or %q, got %q", ProbabilityDistributionStateful, ProbabilityDistributionStateless, cfg.ProbabilityDistribution))
 	}
 
-	if source == PerRouteConfigSource || len(cfg.Responses) > 0 || cfg.LoadBased != nil {
+	if source == PerRouteSource || len(cfg.Responses) > 0 || cfg.LoadBased != nil {
 		if err := validateBehavior(cfg.Responses, cfg.LoadBased, "configuration"); err != nil {
 			validationErrors = append(validationErrors, err)
 		}
@@ -172,23 +154,6 @@ func validateBehavior(responses []StatusDistribution, loadBased *LoadBasedConfig
 		}
 	}
 	return errors.Join(validationErrors...)
-}
-
-func hasTopLevelKey(data []byte, key string) bool {
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil || len(node.Content) == 0 {
-		return false
-	}
-	root := node.Content[0]
-	if root.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
 }
 
 func validateStatusDistribution(sd StatusDistribution, context string) error {
@@ -236,168 +201,6 @@ func validateStatusDistribution(sd StatusDistribution, context string) error {
 		}
 	}
 	return errors.Join(validationErrors...)
-}
-
-func validateLocalResponseNodes(data []byte) error {
-	var document yaml.Node
-	if err := yaml.Unmarshal(data, &document); err != nil {
-		return err
-	}
-	if len(document.Content) == 0 {
-		return nil
-	}
-	root := dereferenceYAMLNode(document.Content[0])
-	var validationErrors []error
-	visitResponses := func(node *yaml.Node) {
-		node = dereferenceYAMLNode(node)
-		if node == nil || node.Kind != yaml.SequenceNode {
-			return
-		}
-		items, err := effectiveSequence(node)
-		if err != nil {
-			validationErrors = append(validationErrors, err)
-			return
-		}
-		for _, response := range items {
-			fields, err := effectiveMapping(response)
-			if err != nil {
-				validationErrors = append(validationErrors, err)
-				continue
-			}
-			localResponse, exists := fields["local_response"]
-			if !exists {
-				continue
-			}
-			localFields, err := effectiveMapping(localResponse)
-			if err != nil {
-				validationErrors = append(validationErrors, fmt.Errorf("local_response: %w", err))
-				continue
-			}
-			if body, bodyExists := localFields["body"]; bodyExists && !isYAMLString(body) {
-				validationErrors = append(validationErrors, fmt.Errorf("line %d local_response.body must be a string", body.Line))
-			}
-			headers, exists := localFields["headers"]
-			if !exists {
-				continue
-			}
-			headerNodes, err := effectiveSequence(headers)
-			if err != nil {
-				validationErrors = append(validationErrors, fmt.Errorf("local_response.headers: %w", err))
-				continue
-			}
-			for _, headerNode := range headerNodes {
-				headerFields, err := effectiveMapping(headerNode)
-				if err != nil {
-					validationErrors = append(validationErrors, fmt.Errorf("line %d local_response.headers entry: %w", headerNode.Line, err))
-					continue
-				}
-				for _, required := range []string{"name", "value"} {
-					value, exists := headerFields[required]
-					if !exists || !isYAMLString(value) {
-						validationErrors = append(validationErrors, fmt.Errorf("line %d local_response.headers entries require string %s", headerNode.Line, required))
-					}
-				}
-			}
-		}
-	}
-	rootFields, err := effectiveMapping(root)
-	if err != nil {
-		return err
-	}
-	if responses, exists := rootFields["responses"]; exists {
-		visitResponses(responses)
-	}
-	if loadBased, exists := rootFields["load_based"]; exists {
-		visitLoadResponses(loadBased, visitResponses, &validationErrors)
-	}
-	if endpoints, exists := rootFields["endpoints"]; exists {
-		endpointNodes, err := effectiveSequence(endpoints)
-		if err != nil {
-			validationErrors = append(validationErrors, err)
-		} else {
-			for _, endpoint := range endpointNodes {
-				endpointFields, err := effectiveMapping(endpoint)
-				if err != nil {
-					validationErrors = append(validationErrors, err)
-					continue
-				}
-				if responses, exists := endpointFields["responses"]; exists {
-					visitResponses(responses)
-				}
-				if loadBased, exists := endpointFields["load_based"]; exists {
-					visitLoadResponses(loadBased, visitResponses, &validationErrors)
-				}
-			}
-		}
-	}
-	return errors.Join(validationErrors...)
-}
-
-func visitLoadResponses(node *yaml.Node, visit func(*yaml.Node), validationErrors *[]error) {
-	fields, err := effectiveMapping(node)
-	if err != nil {
-		*validationErrors = append(*validationErrors, err)
-		return
-	}
-	for _, tierName := range []string{"healthy", "tipping_point"} {
-		tier, exists := fields[tierName]
-		if !exists {
-			continue
-		}
-		tierFields, err := effectiveMapping(tier)
-		if err != nil {
-			*validationErrors = append(*validationErrors, err)
-			continue
-		}
-		if responses, exists := tierFields["responses"]; exists {
-			visit(responses)
-		}
-	}
-}
-
-func effectiveMapping(node *yaml.Node) (map[string]*yaml.Node, error) {
-	node = dereferenceYAMLNode(node)
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("must be an object")
-	}
-	var decoded map[string]yaml.Node
-	if err := node.Decode(&decoded); err != nil {
-		return nil, err
-	}
-	fields := make(map[string]*yaml.Node, len(decoded))
-	for key := range decoded {
-		value := decoded[key]
-		fields[key] = &value
-	}
-	return fields, nil
-}
-
-func effectiveSequence(node *yaml.Node) ([]*yaml.Node, error) {
-	node = dereferenceYAMLNode(node)
-	if node == nil || node.Kind != yaml.SequenceNode {
-		return nil, fmt.Errorf("must be an array")
-	}
-	var decoded []yaml.Node
-	if err := node.Decode(&decoded); err != nil {
-		return nil, err
-	}
-	items := make([]*yaml.Node, len(decoded))
-	for i := range decoded {
-		items[i] = &decoded[i]
-	}
-	return items, nil
-}
-
-func isYAMLString(node *yaml.Node) bool {
-	node = dereferenceYAMLNode(node)
-	return node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() == "!!str"
-}
-
-func dereferenceYAMLNode(node *yaml.Node) *yaml.Node {
-	for node != nil && node.Kind == yaml.AliasNode {
-		node = node.Alias
-	}
-	return node
 }
 
 func validateLoadBased(lb *LoadBasedConfig, context string) error {
@@ -455,64 +258,16 @@ func validateLoadBased(lb *LoadBasedConfig, context string) error {
 	return errors.Join(validationErrors...)
 }
 
-// Percentile represents a quantile-duration pair in a distribution.
-type Percentile struct {
-	Quantile float64
-	Duration time.Duration
+// MatchConfig defines how a request is matched to an endpoint.
+type MatchConfig struct {
+	Prefix  string              `yaml:"prefix,omitempty"`
+	Exact   string              `yaml:"exact,omitempty"`
+	Headers []HeaderMatchConfig `yaml:"headers,omitempty"`
 }
 
-// ParsePercentileDistribution parses a map of percentile keys (e.g., "p0.0", "p50.0", "p99.9")
-// to duration strings into a sorted slice of Percentiles.
-func ParsePercentileDistribution(dist map[string]string) ([]Percentile, error) {
-	if len(dist) == 0 {
-		return nil, fmt.Errorf("distribution must have at least one entry")
-	}
-
-	var result []Percentile
-	for key, durStr := range dist {
-		quantile, err := parsePercentileKey(key)
-		if err != nil {
-			return nil, err
-		}
-		dur, err := time.ParseDuration(durStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid duration for %q: %w", key, err)
-		}
-		if dur < 0 {
-			return nil, fmt.Errorf("negative duration for %q: %v", key, dur)
-		}
-		result = append(result, Percentile{Quantile: quantile, Duration: dur})
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Quantile < result[j].Quantile
-	})
-
-	// Validate that durations are non-decreasing.
-	for i := 1; i < len(result); i++ {
-		if result[i].Duration < result[i-1].Duration {
-			return nil, fmt.Errorf("distribution values must be non-decreasing: p%.1f (%v) < p%.1f (%v)",
-				result[i].Quantile*100, result[i].Duration,
-				result[i-1].Quantile*100, result[i-1].Duration)
-		}
-	}
-
-	return result, nil
-}
-
-// parsePercentileKey parses keys like "p0.0", "p50.0", "p99.9", "p100.0"
-// into a quantile value between 0.0 and 1.0.
-func parsePercentileKey(key string) (float64, error) {
-	if !strings.HasPrefix(key, "p") {
-		return 0, fmt.Errorf("percentile key must start with 'p', got %q", key)
-	}
-	numStr := key[1:]
-	val, err := strconv.ParseFloat(numStr, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid percentile key %q: %w", key, err)
-	}
-	if val < 0 || val > 100 {
-		return 0, fmt.Errorf("percentile key %q: value must be between 0 and 100", key)
-	}
-	return val / 100.0, nil
+// HeaderMatchConfig defines a header-based match condition.
+type HeaderMatchConfig struct {
+	Name         string `yaml:"name"`
+	ExactMatch   string `yaml:"exact_match,omitempty"`
+	PresentMatch bool   `yaml:"present_match,omitempty"`
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/envoyproxy/envoy/source/extensions/dynamic_modules/sdk/go/shared"
 
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
@@ -44,7 +45,7 @@ var activeRequests atomic.Int64
 type (
 	// endpointEntry holds a compiled endpoint with its response distribution.
 	endpointEntry struct {
-		match        fault.MatchConfig
+		match        config.MatchConfig
 		distribution *fault.ResponseDistribution
 		loadBased    *fault.LoadBasedResponseDistribution
 	}
@@ -53,7 +54,7 @@ type (
 	// It holds the parsed config and pre-built response distributions.
 	latencyFaultFilterFactory struct {
 		shared.EmptyHttpFilterFactory
-		config       *fault.FilterConfig
+		config       *config.FilterConfig
 		endpoints    []endpointEntry
 		distribution *fault.ResponseDistribution
 		loadBased    *fault.LoadBasedResponseDistribution
@@ -205,7 +206,7 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 				time.Sleep(remainingDelay)
 				scheduler.Schedule(func() {
 					f.handle.SendLocalResponse(
-						uint32(sample.Status), //nolint:gosec // Status is validated to be 200-599 by ParseConfig
+						uint32(sample.Status), //nolint:gosec // Status is validated to be 200-599 by the config loader.
 						responseHeaders,
 						body,
 						localResponseDetail(sample.Status),
@@ -229,7 +230,7 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 		body, responseHeaders := f.localResponse(f.sample, &attrs)
 
 		f.handle.SendLocalResponse(
-			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 200-599 by ParseConfig
+			uint32(f.sample.Status), //nolint:gosec // Status is validated to be 200-599 by the config loader.
 			responseHeaders,
 			body,
 			localResponseDetail(f.sample.Status),
@@ -344,8 +345,8 @@ type CustomHttpFilterConfigFactory struct { //nolint:revive
 }
 
 // Create implements [shared.HttpFilterConfigFactory].
-func (f *CustomHttpFilterConfigFactory) Create(handle shared.HttpFilterConfigHandle, config []byte) (shared.HttpFilterFactory, error) {
-	factory, err := buildFilterFactory(config)
+func (f *CustomHttpFilterConfigFactory) Create(handle shared.HttpFilterConfigHandle, data []byte) (shared.HttpFilterFactory, error) {
+	factory, err := buildFilterFactory(data)
 	if err != nil {
 		handle.Log(shared.LogLevelError, "dynamic-fault-injection: "+err.Error())
 		return nil, err
@@ -360,32 +361,23 @@ func (f *CustomHttpFilterConfigFactory) Create(handle shared.HttpFilterConfigHan
 
 // CreatePerRoute parses per-route configuration for the dynamic-fault-injection filter.
 func (f *CustomHttpFilterConfigFactory) CreatePerRoute(unparsedConfig []byte) (any, error) {
-	return buildFilterFactoryForSource(unparsedConfig, fault.PerRouteConfigSource)
+	return buildFilterFactoryForSource(unparsedConfig, config.PerRouteSource)
 }
 
 // buildFilterFactory parses config and builds the filter factory with pre-computed distributions.
-func buildFilterFactory(config []byte) (*latencyFaultFilterFactory, error) {
-	return buildFilterFactoryForSource(config, fault.FilterConfigSource)
+func buildFilterFactory(data []byte) (*latencyFaultFilterFactory, error) {
+	return buildFilterFactoryForSource(data, config.FilterSource)
 }
 
-func buildFilterFactoryForSource(config []byte, source fault.ConfigSource) (*latencyFaultFilterFactory, error) {
-	if err := validateConfigAgainstSchema(config, source); err != nil {
-		return nil, fmt.Errorf("failed to validate config: %w", err)
-	}
-	var cfg *fault.FilterConfig
-	var err error
-	if source == fault.PerRouteConfigSource {
-		cfg, err = fault.ParsePerRouteConfig(config)
-	} else {
-		cfg, err = fault.ParseConfig(config)
-	}
+func buildFilterFactoryForSource(data []byte, source config.Source) (*latencyFaultFilterFactory, error) {
+	cfg, err := filterConfigLoader.Load(data, source)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+		return nil, err
 	}
 
 	factory := &latencyFaultFilterFactory{
 		config: cfg,
-		direct: source == fault.PerRouteConfigSource || len(cfg.Endpoints) == 0,
+		direct: source == config.PerRouteSource || len(cfg.Endpoints) == 0,
 	}
 	if factory.direct {
 		if len(cfg.Responses) > 0 {

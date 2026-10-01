@@ -434,6 +434,15 @@ sampling and response metadata. It then increments the counter. The counter is d
 the stream completes, with filter destruction as an idempotent cleanup fallback. Envoy runs its
 workers as threads in one process, so the counter is shared across workers.
 
+### Configuration Loading
+
+`internal/config` owns configuration types and the loading pipeline. Filter-level and per-route
+factories use the same loader: validate raw YAML or JSON against the schema, decode with strict
+field checking, then validate semantic relationships such as load-threshold ordering.
+`schema.go` embeds the canonical root `config.schema.json` and supplies its bytes to the loader.
+`internal/fault` uses the validated types for matching and sampling; `plugin.go` integrates them
+with Envoy's SDK callbacks.
+
 ### Status Code Selection
 
 Each endpoint has one or more response entries with a `resolution` that serves as both:

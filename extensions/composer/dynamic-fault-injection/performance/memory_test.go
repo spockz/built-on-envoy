@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
 )
 
@@ -24,7 +25,7 @@ func runMemory(mode, endpointCountArg, resolutionArg string) {
 		panic("resolution must be a positive integer")
 	}
 
-	statusDists := []fault.StatusDistribution{
+	statusDists := []config.StatusDistribution{
 		{Status: 200, Resolution: resolution, Distribution: benchmarkDistribution()},
 		{Status: 503, Resolution: benchmarkMax(resolution/10, 1), Distribution: benchmarkDistribution()},
 	}

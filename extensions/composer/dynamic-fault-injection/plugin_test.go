@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/fault"
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 )
 
 // Valid YAML config for testing.
@@ -247,7 +247,7 @@ func TestPerRouteConfigOverride(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("per-route config overrides factory", func(t *testing.T) {
-		perRouteFactory, err := buildFilterFactoryForSource(ValidPerRouteConfig, fault.PerRouteConfigSource)
+		perRouteFactory, err := buildFilterFactoryForSource(ValidPerRouteConfig, config.PerRouteSource)
 		require.NoError(t, err)
 
 		handle := newFilterHandleWithPerRouteConfig(ctrl, perRouteFactory)

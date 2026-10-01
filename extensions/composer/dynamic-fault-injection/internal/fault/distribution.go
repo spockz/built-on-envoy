@@ -14,6 +14,8 @@ import (
 	"math/big"
 	"sync"
 	"time"
+
+	"github.com/tetratelabs/built-on-envoy/extensions/composer/dynamic-fault-injection/internal/config"
 )
 
 type durationDistribution interface {
@@ -23,11 +25,11 @@ type durationDistribution interface {
 // ProbabilityDistribution samples from a distribution using linear interpolation
 // between percentile boundaries. Stateless — each sample is independent.
 type ProbabilityDistribution struct {
-	percentiles []Percentile
+	percentiles []config.Percentile
 }
 
 // NewProbabilityDistribution creates a new stateless probability distribution.
-func NewProbabilityDistribution(percentiles []Percentile) *ProbabilityDistribution {
+func NewProbabilityDistribution(percentiles []config.Percentile) *ProbabilityDistribution {
 	return &ProbabilityDistribution{
 		percentiles: percentiles,
 	}
@@ -85,7 +87,7 @@ type StatefulProbabilityDistribution struct {
 
 // NewStatefulProbabilityDistribution creates a new stateful distribution with
 // the given resolution (number of pre-computed samples).
-func NewStatefulProbabilityDistribution(percentiles []Percentile, resolution int) *StatefulProbabilityDistribution {
+func NewStatefulProbabilityDistribution(percentiles []config.Percentile, resolution int) *StatefulProbabilityDistribution {
 	values := make([]time.Duration, resolution)
 	idx := 0
 	prevQuantile := 0.0
@@ -142,7 +144,7 @@ func (spd *StatefulProbabilityDistribution) Sample() time.Duration {
 type ResponseSample struct {
 	Status        int
 	Duration      time.Duration
-	LocalResponse *LocalResponseConfig
+	LocalResponse *config.LocalResponseConfig
 }
 
 // ResponseDistribution selects a status code based on resolution weights,
@@ -156,12 +158,12 @@ type responseEntry struct {
 	status        int
 	weight        int
 	distribution  durationDistribution
-	localResponse *LocalResponseConfig
+	localResponse *config.LocalResponseConfig
 }
 
 // NewResponseDistributionWithMode creates a ResponseDistribution with the requested
 // sampling mode: "stateful" or "stateless".
-func NewResponseDistributionWithMode(statusDists []StatusDistribution, distributionMode string) (*ResponseDistribution, error) {
+func NewResponseDistributionWithMode(statusDists []config.StatusDistribution, distributionMode string) (*ResponseDistribution, error) {
 	if len(statusDists) == 0 {
 		return nil, fmt.Errorf("response distribution must have at least one status entry")
 	}
@@ -169,7 +171,7 @@ func NewResponseDistributionWithMode(statusDists []StatusDistribution, distribut
 	totalWeight := 0
 
 	for _, sd := range statusDists {
-		percentiles, err := ParsePercentileDistribution(sd.Distribution)
+		percentiles, err := config.ParsePercentileDistribution(sd.Distribution)
 		if err != nil {
 			return nil, err
 		}
@@ -241,11 +243,11 @@ type greyZoneState struct {
 // NewLoadBasedResponseDistributionWithMode creates a load-based distribution
 // using either stateful or stateless sampling.
 func NewLoadBasedResponseDistributionWithMode(
-	healthyDists []StatusDistribution,
+	healthyDists []config.StatusDistribution,
 	healthyThreshold float64,
-	tippingDists []StatusDistribution,
+	tippingDists []config.StatusDistribution,
 	tippingThreshold float64,
-	gz *GreyZoneConfig,
+	gz *config.GreyZoneConfig,
 	distributionMode string,
 ) (*LoadBasedResponseDistribution, error) {
 	healthy, err := NewResponseDistributionWithMode(healthyDists, distributionMode)
@@ -280,11 +282,11 @@ func NewLoadBasedResponseDistributionWithMode(
 	return lb, nil
 }
 
-func newDurationDistribution(percentiles []Percentile, resolution int, distributionMode string) (durationDistribution, error) {
+func newDurationDistribution(percentiles []config.Percentile, resolution int, distributionMode string) (durationDistribution, error) {
 	switch distributionMode {
-	case ProbabilityDistributionStateful:
+	case config.ProbabilityDistributionStateful:
 		return NewStatefulProbabilityDistribution(percentiles, resolution), nil
-	case ProbabilityDistributionStateless:
+	case config.ProbabilityDistributionStateless:
 		return NewProbabilityDistribution(percentiles), nil
 	default:
 		return nil, fmt.Errorf("unsupported probability distribution mode: %q", distributionMode)
