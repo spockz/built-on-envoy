@@ -489,6 +489,11 @@ The filter adds response headers to indicate what was injected:
 | `x-fault-worker-index` | Envoy worker index that made the fault decision; only included when `diagnostic` is `true` |
 | `x-fault-injected` | Set to "response" when a sampled status below 400 overrides upstream, or "abort" for sampled statuses 400 and above |
 | `x-fault-status` | The status code selected by the distribution |
+| `x-fault-upstream-status` | The original upstream status code, including when replaced by the sampled status |
+
+For matched responses, these attributes are also recorded on the active span when one is available,
+using the `fault.` prefix (for example, `fault.status` and `fault.upstream-status`). This preserves
+visibility into backend failures even when the sampled response is successful.
 
 ### Multi-worker active request test
 

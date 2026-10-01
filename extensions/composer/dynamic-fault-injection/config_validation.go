@@ -3,8 +3,9 @@
 // The full text of the Apache license is available in the LICENSE file at
 // the root of the repo.
 
-// Package impl validates extension configuration against its canonical schema
+// Configuration is validated against the extension's canonical schema
 // before typed decoding so malformed values cannot be silently coerced.
+
 package impl
 
 import (

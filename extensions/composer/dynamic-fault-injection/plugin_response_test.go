@@ -59,6 +59,7 @@ func TestSetFaultAttributesOnHeaderMap_SetsHeadersAndSpanTagsOnce(t *testing.T) 
 	require.Equal(t, attrs.ActualUpstream, headers.GetOne(actualUpstreamHeader).ToUnsafeString())
 	require.Equal(t, attrs.AddedDelay, headers.GetOne(addedDelayHeader).ToUnsafeString())
 	require.Equal(t, attrs.Status, headers.GetOne(statusHeader).ToUnsafeString())
+	require.Equal(t, attrs.UpstreamStatus, headers.GetOne(upstreamStatusHeader).ToUnsafeString())
 	require.Equal(t, "7", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 	require.Equal(t, attrs.Injected, headers.GetOne(injectedHeader).ToUnsafeString())
 	require.Equal(t, attrs.WorkerIndex, headers.GetOne(workerIndexHeader).ToUnsafeString())
@@ -81,6 +82,7 @@ func TestSetFaultAttributesOnHeaderArray_SetsHeadersAndSpanTagsOnce(t *testing.T
 	requireResponseHeader(t, headers, actualUpstreamHeader, attrs.ActualUpstream)
 	requireResponseHeader(t, headers, addedDelayHeader, attrs.AddedDelay)
 	requireResponseHeader(t, headers, statusHeader, attrs.Status)
+	requireResponseHeader(t, headers, upstreamStatusHeader, attrs.UpstreamStatus)
 	requireResponseHeader(t, headers, requestsInFlightHeader, "7")
 	requireResponseHeader(t, headers, injectedHeader, attrs.Injected)
 	requireResponseHeader(t, headers, workerIndexHeader, attrs.WorkerIndex)
@@ -88,6 +90,7 @@ func TestSetFaultAttributesOnHeaderArray_SetsHeadersAndSpanTagsOnce(t *testing.T
 	requireHeaderCount(t, headers, actualUpstreamHeader, 1)
 	requireHeaderCount(t, headers, addedDelayHeader, 1)
 	requireHeaderCount(t, headers, statusHeader, 1)
+	requireHeaderCount(t, headers, upstreamStatusHeader, 1)
 	requireHeaderCount(t, headers, requestsInFlightHeader, 1)
 	requireHeaderCount(t, headers, injectedHeader, 1)
 	requireHeaderCount(t, headers, workerIndexHeader, 1)
@@ -99,6 +102,7 @@ func testFaultAttributes() faultAttributes {
 		ActualUpstream:   "10ms",
 		AddedDelay:       "90ms",
 		Status:           "503",
+		UpstreamStatus:   "200",
 		RequestsInFlight: 7,
 		Injected:         "abort",
 		WorkerIndex:      "3",
@@ -110,6 +114,7 @@ func expectFaultSpanTags(span *mocks.MockSpan) {
 	span.EXPECT().SetTag(actualUpstreamTag, "10ms").Times(1)
 	span.EXPECT().SetTag(addedDelayTag, "90ms").Times(1)
 	span.EXPECT().SetTag(statusTag, "503").Times(1)
+	span.EXPECT().SetTag(upstreamStatusTag, "200").Times(1)
 	span.EXPECT().SetTag(requestsInFlightTag, "7").Times(1)
 	span.EXPECT().SetTag(injectedTag, "abort").Times(1)
 	span.EXPECT().SetTag(workerIndexTag, "3").Times(1)
@@ -171,6 +176,7 @@ func TestOnResponseHeaders_DelayedAbort(t *testing.T) {
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-actual-upstream")
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-added-delay")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-status", "503")
+	requireResponseHeader(t, localResponseHeaders, upstreamStatusHeader, "200")
 	requireResponseHeader(t, localResponseHeaders, requestsInFlightHeader, "7")
 }
 
@@ -207,6 +213,7 @@ func TestOnResponseHeaders_ImmediateAbort(t *testing.T) {
 	requireResponseHeaderPresent(t, localResponseHeaders, "x-fault-actual-upstream")
 	requireResponseHeaderMissing(t, localResponseHeaders, "x-fault-added-delay")
 	requireResponseHeader(t, localResponseHeaders, "x-fault-status", "500")
+	requireResponseHeader(t, localResponseHeaders, upstreamStatusHeader, "200")
 	requireResponseHeader(t, localResponseHeaders, requestsInFlightHeader, "8")
 }
 
@@ -253,6 +260,7 @@ func TestOnResponseHeaders_DelaysExpectedResponse(t *testing.T) {
 	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
 	require.NotEmpty(t, headers.GetOne("x-fault-added-delay").ToUnsafeString())
 	require.Equal(t, "200", headers.GetOne("x-fault-status").ToUnsafeString())
+	require.Equal(t, "200", headers.GetOne(upstreamStatusHeader).ToUnsafeString())
 	require.Equal(t, "9", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 	scheduler.Wait(t)
 }
@@ -280,45 +288,71 @@ func TestOnResponseHeaders_ExpectedResponseNeedsNoDelay(t *testing.T) {
 	require.NotEmpty(t, headers.GetOne("x-fault-actual-upstream").ToUnsafeString())
 	require.Empty(t, headers.GetOne("x-fault-added-delay").ToUnsafeString())
 	require.Equal(t, "200", headers.GetOne("x-fault-status").ToUnsafeString())
+	require.Equal(t, "200", headers.GetOne(upstreamStatusHeader).ToUnsafeString())
 	require.Equal(t, "4", headers.GetOne(requestsInFlightHeader).ToUnsafeString())
 }
 
 func TestOnResponseHeaders_SampledSuccessOverridesUpstreamError(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	handle := newFilterHandleWithoutPerRouteConfig(ctrl)
-	body := `{"error":"unavailable"}`
-	localResponse := &fault.LocalResponseConfig{
-		Body: &body,
-		Headers: []fault.LocalResponseHeader{
-			{Name: "Content-Type", Value: "application/json"},
-			{Name: "Set-Cookie", Value: "first=1"},
-			{Name: "Set-Cookie", Value: "second=2"},
-		},
-	}
-	var gotHeaders [][2]string
-	handle.EXPECT().SendLocalResponse(uint32(200), gomock.Any(), []byte(body), "fault_response").Do(
-		func(_ uint32, headers [][2]string, _ []byte, _ string) { gotHeaders = headers },
-	)
-	filter := &latencyFaultFilter{
-		handle:               handle,
-		matched:              true,
-		sample:               fault.ResponseSample{Status: 200, Duration: time.Millisecond, LocalResponse: localResponse},
-		requestEntryInFlight: 6,
-		requestStart:         time.Now().Add(-10 * time.Millisecond),
-	}
-	headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"500"}})
+	for _, tc := range []struct {
+		name         string
+		duration     time.Duration
+		upstreamTime time.Duration
+		wantStatus   shared.HeadersStatus
+	}{
+		{name: "immediate", duration: time.Millisecond, upstreamTime: 10 * time.Millisecond, wantStatus: shared.HeadersStatusStop},
+		{name: "delayed", duration: 100 * time.Millisecond, wantStatus: shared.HeadersStatusStopAllAndBuffer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			handle := mocks.NewMockHttpFilterHandle(ctrl)
+			span := mocks.NewMockSpan(ctrl)
+			handle.EXPECT().GetActiveSpan().Return(span).Times(1)
+			tags := make(map[string]string)
+			span.EXPECT().SetTag(gomock.Any(), gomock.Any()).Do(func(name, value string) { tags[name] = value }).AnyTimes()
+			body := `{"error":"unavailable"}`
+			localResponse := &fault.LocalResponseConfig{
+				Body: &body,
+				Headers: []fault.LocalResponseHeader{
+					{Name: "Content-Type", Value: "application/json"},
+					{Name: "Set-Cookie", Value: "first=1"},
+					{Name: "Set-Cookie", Value: "second=2"},
+				},
+			}
+			var gotHeaders [][2]string
+			handle.EXPECT().SendLocalResponse(uint32(200), gomock.Any(), []byte(body), "fault_response").Do(
+				func(_ uint32, headers [][2]string, _ []byte, _ string) { gotHeaders = headers },
+			)
+			scheduler := newResponseTestScheduler()
+			if tc.wantStatus == shared.HeadersStatusStopAllAndBuffer {
+				handle.EXPECT().GetScheduler().Return(scheduler)
+			}
+			filter := &latencyFaultFilter{
+				handle:               handle,
+				matched:              true,
+				sample:               fault.ResponseSample{Status: 200, Duration: tc.duration, LocalResponse: localResponse},
+				requestEntryInFlight: 6,
+				requestStart:         time.Now().Add(-tc.upstreamTime),
+			}
+			headers := fake.NewFakeHeaderMap(map[string][]string{":status": {"500"}})
 
-	status := filter.OnResponseHeaders(headers, false)
-	require.Equal(t, shared.HeadersStatusStop, status)
-	requireResponseHeader(t, gotHeaders, "content-type", "application/json")
-	requireResponseHeader(t, gotHeaders, injectedHeader, "response")
-	requireResponseHeader(t, gotHeaders, injectedDelayHeader, "1ms")
-	requireResponseHeader(t, gotHeaders, statusHeader, "200")
-	requireResponseHeader(t, gotHeaders, requestsInFlightHeader, "6")
-	requireResponseHeaderPresent(t, gotHeaders, actualUpstreamHeader)
-	requireHeaderCount(t, gotHeaders, "set-cookie", 2)
-	require.Equal(t, []string{"first=1", "second=2"}, headerValues(gotHeaders, "set-cookie"))
+			status := filter.OnResponseHeaders(headers, false)
+			require.Equal(t, tc.wantStatus, status)
+			if status == shared.HeadersStatusStopAllAndBuffer {
+				scheduler.Wait(t)
+			}
+			requireResponseHeader(t, gotHeaders, "content-type", "application/json")
+			requireResponseHeader(t, gotHeaders, injectedHeader, "response")
+			requireResponseHeader(t, gotHeaders, injectedDelayHeader, tc.duration.String())
+			requireResponseHeader(t, gotHeaders, statusHeader, "200")
+			requireResponseHeader(t, gotHeaders, upstreamStatusHeader, "500")
+			requireResponseHeader(t, gotHeaders, requestsInFlightHeader, "6")
+			requireResponseHeaderPresent(t, gotHeaders, actualUpstreamHeader)
+			requireHeaderCount(t, gotHeaders, "set-cookie", 2)
+			require.Equal(t, []string{"first=1", "second=2"}, headerValues(gotHeaders, "set-cookie"))
+			require.Equal(t, "200", tags[statusTag])
+			require.Equal(t, "500", tags[upstreamStatusTag])
+		})
+	}
 }
 
 func headerValues(headers [][2]string, name string) []string {

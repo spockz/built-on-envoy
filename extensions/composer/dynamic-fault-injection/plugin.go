@@ -25,6 +25,7 @@ const (
 	injectedDelayHeader    = "x-fault-injected-delay"
 	injectedHeader         = "x-fault-injected"
 	statusHeader           = "x-fault-status"
+	upstreamStatusHeader   = "x-fault-upstream-status"
 	workerIndexHeader      = "x-fault-worker-index"
 
 	// Span tag names (prefixed with "fault.")
@@ -34,6 +35,7 @@ const (
 	injectedDelayTag    = "fault.injected-delay"
 	injectedTag         = "fault.injected"
 	statusTag           = "fault.status"
+	upstreamStatusTag   = "fault.upstream-status"
 	workerIndexTag      = "fault.worker-index"
 )
 
@@ -84,6 +86,7 @@ type (
 		InjectedDelay    string
 		Injected         string
 		Status           string
+		UpstreamStatus   string
 		WorkerIndex      string
 	}
 )
@@ -192,6 +195,7 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 				ActualUpstream:   elapsed.String(),
 				AddedDelay:       remainingDelay.String(),
 				Status:           fmt.Sprintf("%d", sample.Status),
+				UpstreamStatus:   status,
 				RequestsInFlight: f.requestEntryInFlight,
 				WorkerIndex:      workerIndex,
 			}
@@ -217,6 +221,7 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 			InjectedDelay:    f.sample.Duration.String(),
 			ActualUpstream:   elapsed.String(),
 			Status:           fmt.Sprintf("%d", f.sample.Status),
+			UpstreamStatus:   status,
 			RequestsInFlight: f.requestEntryInFlight,
 			WorkerIndex:      workerIndex,
 		}
@@ -237,6 +242,7 @@ func (f *latencyFaultFilter) OnResponseHeaders(headers shared.HeaderMap, _ bool)
 		InjectedDelay:    f.sample.Duration.String(),
 		ActualUpstream:   elapsed.String(),
 		Status:           fmt.Sprintf("%d", f.sample.Status),
+		UpstreamStatus:   status,
 		RequestsInFlight: f.requestEntryInFlight,
 		WorkerIndex:      workerIndex,
 	}
@@ -479,6 +485,9 @@ func (f *latencyFaultFilter) setFaultAttributesOnHeaderMap(headers shared.Header
 	if attrs.Status != "" {
 		headers.Set(statusHeader, attrs.Status)
 	}
+	if attrs.UpstreamStatus != "" {
+		headers.Set(upstreamStatusHeader, attrs.UpstreamStatus)
+	}
 	if attrs.RequestsInFlight >= 0 {
 		headers.Set(requestsInFlightHeader, strconv.FormatInt(attrs.RequestsInFlight, 10))
 	}
@@ -510,6 +519,9 @@ func (f *latencyFaultFilter) setFaultSpanAttributes(attrs *faultAttributes) {
 	if attrs.Status != "" {
 		span.SetTag(statusTag, attrs.Status)
 	}
+	if attrs.UpstreamStatus != "" {
+		span.SetTag(upstreamStatusTag, attrs.UpstreamStatus)
+	}
 	if attrs.RequestsInFlight >= 0 {
 		span.SetTag(requestsInFlightTag, strconv.FormatInt(attrs.RequestsInFlight, 10))
 	}
@@ -538,6 +550,9 @@ func (f *latencyFaultFilter) setFaultAttributesOnHeaderArray(headers [][2]string
 	}
 	if attrs.Status != "" {
 		headers = append(headers, [2]string{statusHeader, attrs.Status})
+	}
+	if attrs.UpstreamStatus != "" {
+		headers = append(headers, [2]string{upstreamStatusHeader, attrs.UpstreamStatus})
 	}
 	if attrs.RequestsInFlight >= 0 {
 		headers = append(headers, [2]string{requestsInFlightHeader, strconv.FormatInt(attrs.RequestsInFlight, 10)})

@@ -200,6 +200,10 @@ func TestDynamicFaultInjectionCustomLocalResponses(t *testing.T) {
     {
       "match": {"exact": "/anything/matching"},
       "responses": [{"status": 200, "resolution": 1, "distribution": {"p0.0": "1ms"}, "local_response": {"body": "configured replacement"}}]
+    },
+    {
+      "match": {"exact": "/status/503"},
+      "responses": [{"status": 200, "resolution": 1, "distribution": {"p0.0": "1ms"}}]
     }
   ]
 }`
@@ -221,6 +225,7 @@ func TestDynamicFaultInjectionCustomLocalResponses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusServiceUnavailable, jsonResponse.StatusCode)
 	require.Equal(t, jsonResponse.StatusCode, mustAtoi(t, jsonResponse.Header.Get("x-fault-status")))
+	require.Equal(t, "500", jsonResponse.Header.Get("x-fault-upstream-status"))
 	require.JSONEq(t, `{"error":"unavailable"}`, string(body))
 	require.Equal(t, "application/problem+json", jsonResponse.Header.Get("content-type"))
 	require.Equal(t, "2", jsonResponse.Header.Get("retry-after"))
@@ -234,6 +239,7 @@ func TestDynamicFaultInjectionCustomLocalResponses(t *testing.T) {
 	require.Empty(t, emptyBody)
 	require.Equal(t, http.StatusNoContent, emptyResponse.StatusCode)
 	require.Equal(t, emptyResponse.StatusCode, mustAtoi(t, emptyResponse.Header.Get("x-fault-status")))
+	require.Equal(t, "200", emptyResponse.Header.Get("x-fault-upstream-status"))
 	require.GreaterOrEqual(t, emptyElapsed, 80*time.Millisecond)
 	for path, wantStatus := range map[string]int{"/status/201": http.StatusResetContent, "/status/202": http.StatusNotModified, "/status/501": http.StatusServiceUnavailable} {
 		response, _ := request(http.MethodGet, path)
@@ -258,6 +264,16 @@ func TestDynamicFaultInjectionCustomLocalResponses(t *testing.T) {
 	require.Equal(t, http.StatusOK, matchingResponse.StatusCode)
 	require.NotEqual(t, "configured replacement", string(matchingBody))
 	require.Contains(t, string(matchingBody), "/anything/matching")
+	require.Equal(t, "200", matchingResponse.Header.Get("x-fault-upstream-status"))
+
+	forcedSuccess, _ := request(http.MethodGet, "/status/503")
+	forcedBody, err := io.ReadAll(forcedSuccess.Body)
+	_ = forcedSuccess.Body.Close()
+	require.NoError(t, err)
+	require.Empty(t, forcedBody)
+	require.Equal(t, http.StatusOK, forcedSuccess.StatusCode)
+	require.Equal(t, "200", forcedSuccess.Header.Get("x-fault-status"))
+	require.Equal(t, "503", forcedSuccess.Header.Get("x-fault-upstream-status"))
 }
 
 func mustAtoi(t *testing.T, value string) int {
