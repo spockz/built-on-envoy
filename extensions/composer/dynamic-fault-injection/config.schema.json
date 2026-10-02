@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dynamic-fault-injection/config.schema.json",
-  "title": "dynamic-fault-injection Configuration",
+  "title": "Dynamic Fault Injection Configuration",
   "description": "Configuration for the dynamic fault injection filter. Filter-level configuration may define endpoint selectors; per-route configuration defines direct response distributions or load-based behavior.",
   "type": "object",
   "additionalProperties": false,
