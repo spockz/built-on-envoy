@@ -55,9 +55,15 @@ func seedInstalledEnvoy(cache, version string) error {
 			installed = filepath.Join(home, installed[2:])
 		}
 	}
-	source := filepath.Join(installed, "envoy-versions", version, "bin", "envoy")
-	// #nosec G304 -- Reading the installed BOE binary avoids downloading it again.
-	input, err := os.Open(source)
+	installedRoot, err := os.OpenRoot(installed)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open installed BOE data directory: %w", err)
+	}
+	defer func() { _ = installedRoot.Close() }()
+	input, err := installedRoot.Open(filepath.Join("envoy-versions", version, "bin", "envoy"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

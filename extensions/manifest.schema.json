@@ -159,7 +159,7 @@
           },
           "code": {
             "type": "string",
-            "description": "Code snippet showing usage. Generated from config and commands for executable examples.",
+            "description": "Code snippet showing usage.",
             "minLength": 1
           },
           "config": {
