@@ -81,6 +81,7 @@ type (
 		Description     string                  `yaml:"description" json:"description"`
 		Code            string                  `yaml:"code,omitempty" json:"code,omitempty"`
 		Config          *map[string]any         `yaml:"config,omitempty" json:"config,omitempty"`
+		PreStart        []ExampleCommand        `yaml:"preStart,omitempty" json:"preStart,omitempty"`
 		Commands        []ExampleCommand        `yaml:"commands,omitempty" json:"commands,omitempty"`
 		Comparison      []ExampleComparisonRule `yaml:"comparison,omitempty" json:"comparison,omitempty"`
 		VolatileHeaders []string                `yaml:"volatileHeaders,omitempty" json:"volatileHeaders,omitempty"`
@@ -88,8 +89,16 @@ type (
 
 	// ExampleCommand stores argument boundaries for execution and transcript rendering.
 	ExampleCommand struct {
-		Argv         []string `yaml:"argv" json:"argv"`
-		ExpectedExit int      `yaml:"expectedExit,omitempty" json:"expectedExit,omitempty"`
+		Comment      string        `yaml:"comment,omitempty" json:"comment,omitempty"`
+		Argv         []string      `yaml:"argv" json:"argv"`
+		ExpectedExit int           `yaml:"expectedExit,omitempty" json:"expectedExit,omitempty"`
+		Retry        *ExampleRetry `yaml:"retry,omitempty" json:"retry,omitempty"`
+	}
+
+	// ExampleRetry bounds capture retries without concealing command failures.
+	ExampleRetry struct {
+		HTTPStatus  int `yaml:"httpStatus" json:"httpStatus"`
+		MaxAttempts int `yaml:"maxAttempts" json:"maxAttempts"`
 	}
 
 	// ExampleComparisonRule scopes volatile values without suppressing format changes.

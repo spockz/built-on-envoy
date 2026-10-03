@@ -309,6 +309,153 @@ func TestExampleYAMLSourceValidation(t *testing.T) {
 	}
 }
 
+func TestExamplePreStartYAML(t *testing.T) {
+	base := "title: Example\ndescription: Test\ncode: legacy\n"
+	executable := "config: {}\ncommands:\n  - argv: [printf, ready]\n"
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{name: "pre-start command with comment and expected exit", yaml: base + executable + "preStart:\n  - comment: Prepare the input file.\n    argv: [sh, -c, exit 7]\n    expectedExit: 7\n"},
+		{name: "missing config", yaml: base + "commands:\n  - argv: [printf, ready]\npreStart:\n  - argv: [printf, setup]\n", wantErr: true},
+		{name: "missing request commands", yaml: base + "config: {}\npreStart:\n  - argv: [printf, setup]\n", wantErr: true},
+		{name: "null pre-start", yaml: base + executable + "preStart: null\n", wantErr: true},
+		{name: "empty pre-start", yaml: base + executable + "preStart: []\n", wantErr: true},
+		{name: "empty argv", yaml: base + executable + "preStart:\n  - argv: []\n", wantErr: true},
+		{name: "empty executable", yaml: base + executable + "preStart:\n  - argv: [\"\"]\n", wantErr: true},
+		{name: "null expected exit", yaml: base + executable + "preStart:\n  - argv: [printf, setup]\n    expectedExit: null\n", wantErr: true},
+		{name: "invalid expected exit", yaml: base + executable + "preStart:\n  - argv: [printf, setup]\n    expectedExit: 256\n", wantErr: true},
+		{name: "unknown command field", yaml: base + executable + "preStart:\n  - argv: [printf, setup]\n    shell: true\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var example Example
+			err := yaml.Unmarshal([]byte(tt.yaml), &example)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []ExampleCommand{{Comment: "Prepare the input file.", Argv: []string{"sh", "-c", "exit 7"}, ExpectedExit: 7}}, example.PreStart)
+		})
+	}
+}
+
+func TestExampleCommandCommentYAML(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		wantComment string
+		wantErr     bool
+	}{
+		{
+			name:        "multiline comment is preserved",
+			yaml:        "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n    comment: |\n      First display line\n      Second display line\n",
+			wantComment: "First display line\nSecond display line\n",
+		},
+		{
+			name: "comment may be omitted",
+			yaml: "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n",
+		},
+		{
+			name:    "null comment is rejected",
+			yaml:    "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n    comment: null\n",
+			wantErr: true,
+		},
+		{
+			name:    "non-string comment is rejected",
+			yaml:    "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n    comment: 42\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty comment is rejected",
+			yaml:    "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n    comment: \"\"\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var example Example
+			err := yaml.Unmarshal([]byte(tt.yaml), &example)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantComment, example.Commands[0].Comment)
+		})
+	}
+}
+
+func TestExampleRetryYAMLValidation(t *testing.T) {
+	invalidRetryValues := []struct {
+		name  string
+		retry string
+	}{
+		{name: "null retry", retry: "null"},
+		{name: "non-object retry", retry: "true"},
+		{name: "missing status", retry: "{maxAttempts: 2}"},
+		{name: "missing attempts", retry: "{httpStatus: 200}"},
+		{name: "null status", retry: "{httpStatus: null, maxAttempts: 2}"},
+		{name: "string status", retry: "{httpStatus: '200', maxAttempts: 2}"},
+		{name: "status below range", retry: "{httpStatus: 199, maxAttempts: 2}"},
+		{name: "status above range", retry: "{httpStatus: 600, maxAttempts: 2}"},
+		{name: "null attempts", retry: "{httpStatus: 200, maxAttempts: null}"},
+		{name: "string attempts", retry: "{httpStatus: 200, maxAttempts: '2'}"},
+		{name: "attempts below range", retry: "{httpStatus: 200, maxAttempts: 0}"},
+		{name: "attempts above range", retry: "{httpStatus: 200, maxAttempts: 10001}"},
+		{name: "unknown field", retry: "{httpStatus: 200, maxAttempts: 2, seed: 1}"},
+	}
+
+	for _, phase := range []string{"commands", "preStart"} {
+		t.Run(phase, func(t *testing.T) {
+			validRetries := []struct {
+				name  string
+				retry string
+				want  ExampleRetry
+			}{
+				{name: "minimum bounds", retry: "{httpStatus: 200, maxAttempts: 1}", want: ExampleRetry{HTTPStatus: 200, MaxAttempts: 1}},
+				{name: "maximum bounds", retry: "{httpStatus: 599, maxAttempts: 10000}", want: ExampleRetry{HTTPStatus: 599, MaxAttempts: 10000}},
+			}
+			for _, tt := range validRetries {
+				t.Run(tt.name, func(t *testing.T) {
+					var example Example
+					require.NoError(t, yaml.Unmarshal([]byte(retryExampleYAML(phase, tt.retry)), &example))
+					var got *ExampleRetry
+					if phase == "commands" {
+						got = example.Commands[0].Retry
+					} else {
+						got = example.PreStart[0].Retry
+					}
+					require.Equal(t, &tt.want, got)
+				})
+			}
+
+			for _, tt := range invalidRetryValues {
+				t.Run(tt.name, func(t *testing.T) {
+					var example Example
+					err := yaml.Unmarshal([]byte(retryExampleYAML(phase, tt.retry)), &example)
+					require.Error(t, err)
+				})
+			}
+		})
+	}
+}
+
+func retryExampleYAML(phase, retry string) string {
+	command := "  - argv: [curl]\n    retry: " + retry + "\n"
+	preStart := ""
+	commands := "commands:\n  - argv: [curl]\n"
+	if phase == "commands" {
+		commands = "commands:\n" + command
+	} else {
+		preStart = "preStart:\n" + command
+	}
+	return "title: Example\ndescription: Test\nconfig: {}\n" + preStart + commands
+}
+
 func TestVolatileHeaderNamesYAML(t *testing.T) {
 	var example Example
 	source := "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\nvolatileHeaders: [x-runtime, X-Created-At]\n"
