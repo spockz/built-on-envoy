@@ -10,10 +10,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -22,19 +24,22 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/mccutchen/go-httpbin/v2/httpbin"
 	"github.com/pmezard/go-difflib/difflib"
 	"gopkg.in/yaml.v3"
 
 	"github.com/tetratelabs/built-on-envoy/cli/internal/extensions"
 )
 
-var placeholderPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+var (
+	placeholderPattern        = regexp.MustCompile(`\$\{([^}]+)\}`)
+	curlVerboseBodyDiagnostic = regexp.MustCompile(`^[{}] \[[0-9]+ bytes data\]$`)
+)
 
 type manifestChange struct {
 	path string
@@ -49,21 +54,6 @@ func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (ret
 	root, rootErr := moduleRoot()
 	if rootErr != nil {
 		return rootErr
-	}
-	if len(opts.extensions) == 0 {
-		server, serveErr := startUpstream(opts.upstreamAddress)
-		if serveErr != nil {
-			return serveErr
-		}
-		if _, writeErr := fmt.Fprintf(stdout, "httpbin listening on %s\n", opts.upstreamAddress); writeErr != nil {
-			return fmt.Errorf("write upstream address: %w", writeErr)
-		}
-		select {
-		case <-ctx.Done():
-			return stopUpstream(server)
-		case <-server.done:
-			return stopUpstream(server)
-		}
 	}
 	type extensionInput struct {
 		path     string
@@ -120,19 +110,6 @@ func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (ret
 		return err
 	}
 	defer cleanupBuild()
-
-	var upstream *upstreamServer
-	if hasExecutable {
-		upstream, err = startUpstream(opts.upstreamAddress)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if stopErr := stopUpstream(upstream); stopErr != nil && returnErr == nil {
-				returnErr = stopErr
-			}
-		}()
-	}
 
 	sharedData, err := os.MkdirTemp("", "boe-example-data-*")
 	if err != nil {
@@ -307,40 +284,6 @@ func resolveBoe(root, provided string) (string, func(), error) {
 	return path, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-type upstreamServer struct {
-	server *http.Server
-	done   chan struct{}
-	err    error
-}
-
-func startUpstream(address string) (*upstreamServer, error) {
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return nil, fmt.Errorf("listen for local httpbin upstream at %s: %w", address, err)
-	}
-	server := &http.Server{Handler: httpbin.New(), ReadHeaderTimeout: 5 * time.Second}
-	upstream := &upstreamServer{server: server, done: make(chan struct{})}
-	go func() {
-		upstream.err = server.Serve(listener)
-		if errors.Is(upstream.err, http.ErrServerClosed) {
-			upstream.err = nil
-		}
-		close(upstream.done)
-	}()
-	return upstream, nil
-}
-
-func stopUpstream(upstream *upstreamServer) error {
-	if err := upstream.server.Close(); err != nil {
-		return fmt.Errorf("stop local httpbin upstream: %w", err)
-	}
-	<-upstream.done
-	if upstream.err != nil {
-		return fmt.Errorf("local httpbin upstream failed: %w", upstream.err)
-	}
-	return nil
-}
-
 func runExample(ctx context.Context, root string, opts *options, extensionPath string, manifest *extensions.Manifest, example *extensions.Example, boe, sharedData string) (result string, returnErr error) {
 	workDir, err := os.MkdirTemp("", "boe-example-*")
 	if err != nil {
@@ -381,10 +324,44 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	values := map[string]string{
 		"PROXY_URL":        "http://" + proxyAddr,
 		"ADMIN_URL":        "http://" + adminAddr,
-		"UPSTREAM_ADDRESS": opts.upstreamAddress,
+		"UPSTREAM_ADDRESS": "httpbin.org:443",
 		"WORK_DIR":         workDir,
 	}
+	relExtension, err := filepath.Rel(root, filepath.Dir(manifest.Path))
+	if err != nil {
+		return "", fmt.Errorf("make extension path portable: %w", err)
+	}
+	relExtension = filepath.ToSlash(relExtension)
+	fixturePath := "."
+	if hasFixtures(extensionPath) {
+		fixturePath = filepath.ToSlash(filepath.Join(relExtension, "examples"))
+	}
+	displayConfigValues := map[string]string{
+		"PROXY_URL":        "http://localhost:10000",
+		"ADMIN_URL":        "http://127.0.0.1:9901",
+		"UPSTREAM_ADDRESS": "httpbin.org:443",
+		"WORK_DIR":         fixturePath,
+	}
+	displayCommandValues := make(map[string]string, len(displayConfigValues))
+	for key, value := range displayConfigValues {
+		displayCommandValues[key] = value
+	}
+	// Commands run after the optional Terminal 2 cd, so their work directory is always `.`.
+	displayCommandValues["WORK_DIR"] = "."
+	outputActualValues := make(map[string]string, len(values)+2)
+	for key, value := range values {
+		outputActualValues[key] = value
+	}
+	outputActualValues["ADMIN_AUTHORITY"] = adminAddr
+	outputActualValues["PROXY_AUTHORITY"] = proxyAddr
+	outputDisplayValues := make(map[string]string, len(displayCommandValues)+2)
+	for key, value := range displayCommandValues {
+		outputDisplayValues[key] = value
+	}
+	outputDisplayValues["ADMIN_AUTHORITY"] = "127.0.0.1:9901"
+	outputDisplayValues["PROXY_AUTHORITY"] = "localhost:10000"
 	configJSON := ""
+	displayConfigJSON := ""
 	if example.Config != nil {
 		config, configErr := expandMap(*example.Config, values)
 		if configErr != nil {
@@ -395,6 +372,14 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 			return "", fmt.Errorf("encode config: %w", configErr)
 		}
 		configJSON = string(b)
+		displayConfig, displayErr := expandMap(*example.Config, displayConfigValues)
+		if displayErr != nil {
+			return "", fmt.Errorf("expand displayed config: %w", displayErr)
+		}
+		displayConfigJSON, displayErr = stableJSON(displayConfig)
+		if displayErr != nil {
+			return "", fmt.Errorf("encode displayed config: %w", displayErr)
+		}
 	}
 	args := []string{"run", "--local", filepath.Dir(manifest.Path), "--listen-port", portOf(proxyAddr), "--admin-port", portOf(adminAddr)}
 	if opts.envoyPath != "" {
@@ -402,66 +387,36 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	} else {
 		args = append(args, "--envoy-version", opts.envoyVersion)
 	}
-	args = append(args, "--cluster-insecure", opts.upstreamAddress, "--test-upstream-cluster", opts.upstreamAddress)
 	if example.Config != nil {
 		args = append(args, "--config", configJSON)
 	}
-	transcriptArgs := append([]string(nil), args...)
-	for i, arg := range transcriptArgs {
-		if arg == "--listen-port" && i+1 < len(transcriptArgs) {
-			transcriptArgs[i+1] = "${PROXY_URL##*:}"
-		}
-		if arg == "--admin-port" && i+1 < len(transcriptArgs) {
-			transcriptArgs[i+1] = "${ADMIN_URL##*:}"
-		}
-		if (arg == "--cluster-insecure" || arg == "--test-upstream-cluster") && i+1 < len(transcriptArgs) {
-			transcriptArgs[i+1] = "${UPSTREAM_ADDRESS}"
-		}
+	transcriptArgs := []string{"run", "--local", relExtension}
+	if opts.envoyPath != "" {
+		transcriptArgs = append(transcriptArgs, "--envoy-path", "/path/to/envoy")
+	} else {
+		transcriptArgs = append(transcriptArgs, "--envoy-version", opts.envoyVersion)
 	}
-	for i := range transcriptArgs {
-		if transcriptArgs[i] == "--envoy-path" && i+1 < len(transcriptArgs) {
-			transcriptArgs[i+1] = "${ENVOY_PATH}"
-		}
-	}
-	commandText := "$ boe " + shellJoin(transcriptArgs)
-	// The source transcript uses a portable local path; execution uses the absolute path.
-	relExtension, err := filepath.Rel(root, filepath.Dir(manifest.Path))
-	if err != nil {
-		return "", fmt.Errorf("make extension path portable: %w", err)
-	}
-	commandText = strings.Replace(commandText, shellQuote(filepath.Dir(manifest.Path)), shellQuote(relExtension), 1)
 	if example.Config != nil {
-		stable, stableErr := stableJSON(*example.Config)
-		if stableErr != nil {
-			return "", fmt.Errorf("encode stable example config: %w", stableErr)
-		}
-		commandText = strings.Replace(commandText, shellQuote(configJSON), shellQuote(stable), 1)
+		transcriptArgs = append(transcriptArgs, "--config", displayConfigJSON)
 	}
 	var transcript strings.Builder
-	transcript.WriteString("# Local upstream (started by this generator)\n")
-	transcript.WriteString("# Run the following commands from the repository root.\n")
-	transcript.WriteString("$ export PROXY_URL='http://127.0.0.1:10000'\n")
-	transcript.WriteString("$ export ADMIN_URL='http://127.0.0.1:9901'\n")
-	transcript.WriteString("$ export UPSTREAM_ADDRESS='127.0.0.1:10001'\n")
-	transcript.WriteString("$ export WORK_DIR=\"$(mktemp -d)\"\n")
+	var terminalOne strings.Builder
+	terminalOne.WriteString("# Terminal 1 (from the repository root)\n")
 	if opts.envoyPath != "" {
-		transcript.WriteString("$ export ENVOY_PATH='/path/to/envoy'\n")
-		transcript.WriteString("# Set ENVOY_PATH to a compatible Envoy binary before starting Envoy.\n")
+		terminalOne.WriteString("# Replace /path/to/envoy with a compatible Envoy binary.\n")
 	}
-	transcript.WriteString("$ go run ./cli/tools/gen-examples -serve-upstream -upstream-address \"${UPSTREAM_ADDRESS}\" &\n")
-	transcript.WriteString("$ UPSTREAM_PID=$!\n")
+	terminalOne.WriteString("boe " + shellJoin(transcriptArgs) + "\n")
+	transcript.WriteString(renderFencedBlock("sh", terminalOne.String()))
+	var terminalTwoPrefix strings.Builder
+	terminalTwoPrefix.WriteString("# Terminal 2 (after Envoy is ready, from the repository root)\n")
 	if hasFixtures(extensionPath) {
-		transcript.WriteString("\n# Copy fixture files from extensions/<extension>/examples/ into ${WORK_DIR} before running commands.\n")
-		transcript.WriteString("$ cp -R " + shellQuote(filepath.ToSlash(filepath.Join(relExtension, "examples"))+"/.") + " ${WORK_DIR}/\n")
+		terminalTwoPrefix.WriteString("cd " + shellQuote(fixturePath) + "\n")
 	}
-	transcript.WriteString("\n# Start Envoy\n")
-	transcript.WriteString(commandText + " &\n")
-	transcript.WriteString("$ BOE_PID=$!\n")
-	transcript.WriteString("$ for i in $(seq 1 300); do\n")
-	transcript.WriteString("    [ \"$(curl --silent --max-time 1 \"${ADMIN_URL}/ready\" || true)\" = LIVE ] && break\n")
-	transcript.WriteString("    sleep 0.1\n")
-	transcript.WriteString("  done\n")
-	transcript.WriteString("$ cd \"${WORK_DIR}\"\n\n")
+	type commandTranscript struct {
+		displayed string
+		output    []string
+	}
+	commandTranscripts := make([]commandTranscript, 0, len(example.Commands))
 
 	_ = proxyListener.Close()
 	_ = adminListener.Close()
@@ -486,7 +441,11 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		if len(argv) == 0 {
 			return "", fmt.Errorf("command %d has empty argv", i+1)
 		}
-		transcript.WriteString("$ " + shellJoin(command.Argv) + "\n")
+		displayArgv, displayArgvErr := expandArgv(command.Argv, displayCommandValues)
+		if displayArgvErr != nil {
+			return "", fmt.Errorf("display command %d: %w", i+1, displayArgvErr)
+		}
+		commandResult := commandTranscript{displayed: shellJoin(displayArgv) + "\n"}
 		cmdCtx, cancel := context.WithTimeout(ctx, opts.timeout)
 		// Command argv comes from the executable examples explicitly selected by the extension author.
 		cmd := exec.CommandContext(cmdCtx, argv[0], argv[1:]...) // #nosec G204
@@ -504,39 +463,53 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		cancel()
 		actualExit := exitCode(runErr)
 		if runErr != nil && actualExit < 0 {
-			return "", fmt.Errorf("command %q failed: %w", shellJoin(command.Argv), runErr)
+			return "", fmt.Errorf("command %q failed: %w; stderr: %s", shellJoin(command.Argv), runErr, stderrBuf.String())
 		}
 		if actualExit != command.ExpectedExit {
 			mismatch := fmt.Sprintf("command %q exited %d, expected %d", shellJoin(command.Argv), actualExit, command.ExpectedExit)
 			if runErr != nil {
-				return "", fmt.Errorf("%s: %w", mismatch, runErr)
+				return "", fmt.Errorf("%s: %w; stderr: %s", mismatch, runErr, stderrBuf.String())
 			}
-			return "", errors.New(mismatch)
+			return "", fmt.Errorf("%s; stderr: %s", mismatch, stderrBuf.String())
 		}
 		if stdoutBuf.Len() > 0 {
-			transcript.WriteString("# Output:\n")
-			transcript.WriteString(renderOutput(stdoutBuf.String(), values, !strings.HasSuffix(stdoutBuf.String(), "\n")))
-			transcript.WriteString("# End output\n")
+			rendered, renderErr := renderOutput(stdoutBuf.String(), outputActualValues, outputDisplayValues, "stdout")
+			if renderErr != nil {
+				return "", fmt.Errorf("render command %d stdout: %w", i+1, renderErr)
+			}
+			commandResult.output = append(commandResult.output, rendered)
 		}
-		if stderrBuf.Len() > 0 {
-			transcript.WriteString("# Stderr:\n")
-			transcript.WriteString(renderOutput(stderrBuf.String(), values, !strings.HasSuffix(stderrBuf.String(), "\n")))
-			transcript.WriteString("# End output\n")
+		stderrText := filterCommandDiagnostics(argv, stderrBuf.String())
+		if stderrText != "" {
+			rendered, renderErr := renderOutput(stderrText, outputActualValues, outputDisplayValues, "stderr")
+			if renderErr != nil {
+				return "", fmt.Errorf("render command %d stderr: %w", i+1, renderErr)
+			}
+			commandResult.output = append(commandResult.output, rendered)
 		}
-		transcript.WriteString("\n")
+		commandTranscripts = append(commandTranscripts, commandResult)
 	}
-	transcript.WriteString("$ cd - >/dev/null\n")
-	transcript.WriteString("$ kill \"${BOE_PID}\" \"${UPSTREAM_PID}\"\n")
-	transcript.WriteString("$ rm -rf \"${WORK_DIR}\"\n")
+	for index, command := range commandTranscripts {
+		var shellBlock strings.Builder
+		if index == 0 {
+			shellBlock.WriteString(terminalTwoPrefix.String())
+		}
+		shellBlock.WriteString(command.displayed)
+		transcript.WriteString("\n\n" + renderFencedBlock("sh", shellBlock.String()))
+		for _, output := range command.output {
+			transcript.WriteString("\n\n" + output)
+		}
+	}
+	generatedCode := strings.TrimRight(transcript.String(), "\n") + "\n"
 	oldCode := example.Code
-	equal, err := equivalentTranscript(oldCode, transcript.String(), example.Comparison, example.VolatileHeaders)
+	equal, err := equivalentTranscript(oldCode, generatedCode, example.Comparison, example.VolatileHeaders)
 	if err != nil {
 		return "", fmt.Errorf("compare generated transcript: %w", err)
 	}
 	if equal {
 		return oldCode, nil
 	}
-	return transcript.String(), nil
+	return generatedCode, nil
 }
 
 type lockedBuffer struct {
@@ -565,6 +538,7 @@ type boeProcess struct {
 }
 
 func startBoe(ctx context.Context, boe string, args []string, root, configHome, dataHome, stateHome, runtimeDir string) (*boeProcess, error) {
+	// #nosec G204 -- boe is the generator's explicit input or a binary built from this checkout.
 	cmd := exec.CommandContext(ctx, boe, args...)
 	cmd.Dir = root
 	cmd.Env = replaceEnv(os.Environ(), map[string]string{
@@ -718,48 +692,51 @@ func exitCode(err error) int {
 
 func stageFixtures(extension, workDir string) error {
 	source := filepath.Join(extension, "examples")
-	info, err := os.Stat(source)
+	sourceRoot, err := os.OpenRoot(source)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("inspect examples fixture directory: %w", err)
+		return fmt.Errorf("open examples fixture directory: %w", err)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("examples fixture path %s is not a directory", source)
+	defer func() { _ = sourceRoot.Close() }()
+	destinationRoot, err := os.OpenRoot(workDir)
+	if err != nil {
+		return fmt.Errorf("open fixture destination directory: %w", err)
 	}
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+	defer func() { _ = destinationRoot.Close() }()
+	return fs.WalkDir(sourceRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
+		if path == "." {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("fixture symlinks are not supported: %s", path)
 		}
-		dest := filepath.Join(workDir, rel)
 		if entry.IsDir() {
-			return os.MkdirAll(dest, 0o700)
+			return destinationRoot.MkdirAll(path, 0o700)
 		}
-		// Fixtures are explicitly staged from the selected extension's examples directory.
-		data, err := os.ReadFile(path) // #nosec G304
+		info, err := sourceRoot.Lstat(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("inspect fixture %s: %w", path, err)
 		}
-		info, err := entry.Info()
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("fixture must be a regular file: %s", path)
+		}
+		data, err := sourceRoot.ReadFile(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("read fixture %s: %w", path, err)
 		}
 		mode := info.Mode().Perm() & 0o700
 		if mode == 0 {
 			mode = 0o600
 		}
-		return os.WriteFile(dest, data, mode)
+		if err := destinationRoot.WriteFile(path, data, mode); err != nil {
+			return fmt.Errorf("write fixture %s: %w", path, err)
+		}
+		return nil
 	})
 }
 
@@ -830,41 +807,138 @@ func expandString(value string, values map[string]string) (string, error) {
 	return result, expansionErr
 }
 
-func renderOutput(value string, values map[string]string, noTrailingNewline bool) string {
-	for key, replacement := range values {
-		value = strings.ReplaceAll(value, replacement, "${"+key+"}")
+func renderOutput(value string, actual, display map[string]string, stream string) (string, error) {
+	keys := make([]string, 0, len(actual))
+	for key := range actual {
+		keys = append(keys, key)
 	}
-	lines := strings.SplitAfter(value, "\n")
-	if strings.HasSuffix(value, "\n") {
-		lines = lines[:len(lines)-1]
+	sort.Strings(keys)
+	for _, key := range keys {
+		value = strings.ReplaceAll(value, actual[key], display[key])
 	}
 	var out strings.Builder
-	lineEndings := make([]string, 0, len(lines))
-	for _, line := range lines {
-		ending := ""
-		if strings.HasSuffix(line, "\r\n") {
-			ending = "CRLF"
-			line = strings.TrimSuffix(line, "\r\n")
-		} else if strings.HasSuffix(line, "\n") {
-			ending = "LF"
-			line = strings.TrimSuffix(line, "\n")
+	lineEndings := make([]string, 0, strings.Count(value, "\n"))
+	bareCROffsets := make([]int, 0)
+	for index := 0; index < len(value); index++ {
+		if value[index] == '\r' {
+			if index+1 < len(value) && value[index+1] == '\n' {
+				lineEndings = append(lineEndings, "CRLF")
+				out.WriteByte('\n')
+				index++
+			} else {
+				bareCROffsets = append(bareCROffsets, index)
+				out.WriteString(`\r`)
+			}
+			continue
 		}
-		if ending != "" {
-			lineEndings = append(lineEndings, ending)
+		if value[index] == '\n' {
+			lineEndings = append(lineEndings, "LF")
 		}
-		if line == "" {
-			out.WriteString("#\n")
-		} else {
-			out.WriteString("# " + strings.ReplaceAll(line, "\r", `\r`) + "\n")
+		out.WriteByte(value[index])
+	}
+
+	normalized := out.String()
+	lines := strings.Split(normalized, "\n")
+	trailingWhitespace := make([]lineWhitespace, 0)
+	for index, line := range lines {
+		trimmed := strings.TrimRight(line, " \t")
+		if len(trimmed) != len(line) {
+			trailingWhitespace = append(trailingWhitespace, lineWhitespace{Line: index, Text: line[len(trimmed):]})
+			lines[index] = trimmed
 		}
 	}
+	normalized = strings.Join(lines, "\n")
+	var metadata strings.Builder
+	metadata.WriteString("<!-- " + stream)
 	if len(lineEndings) > 0 {
-		out.WriteString("# Line endings: " + strings.Join(lineEndings, ",") + "\n")
+		metadata.WriteString("; Line endings: " + strings.Join(lineEndings, ","))
 	}
-	if noTrailingNewline {
-		out.WriteString("# No trailing newline\n")
+	if len(bareCROffsets) > 0 {
+		positions := make([]string, len(bareCROffsets))
+		for index, offset := range bareCROffsets {
+			positions[index] = strconv.Itoa(offset)
+		}
+		metadata.WriteString("; Bare CR offsets: " + strings.Join(positions, ","))
 	}
-	return out.String()
+	if len(trailingWhitespace) > 0 {
+		encoded, err := json.Marshal(trailingWhitespace)
+		if err != nil {
+			return "", fmt.Errorf("encode trailing whitespace metadata: %w", err)
+		}
+		metadata.WriteString("; Trailing whitespace: " + base64.StdEncoding.EncodeToString(encoded))
+	}
+	if value != "" && !strings.HasSuffix(value, "\n") {
+		metadata.WriteString("; No trailing newline")
+	}
+	metadata.WriteString(" -->\n")
+	return renderFencedBlock("text", normalized) + "\n" + metadata.String(), nil
+}
+
+type lineWhitespace struct {
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+func renderFencedBlock(language, content string) string {
+	fence := markdownFence(content)
+	var block strings.Builder
+	block.WriteString(fence + language + "\n")
+	block.WriteString(content)
+	if !strings.HasSuffix(content, "\n") {
+		block.WriteByte('\n')
+	}
+	block.WriteString(fence)
+	return block.String()
+}
+
+func markdownFence(content string) string {
+	longest := 0
+	current := 0
+	for index := 0; index < len(content); index++ {
+		if content[index] == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+		} else {
+			current = 0
+		}
+	}
+	if longest < 2 {
+		return "```"
+	}
+	return strings.Repeat("`", longest+1)
+}
+
+func isVerboseCurl(argv []string) bool {
+	if len(argv) == 0 || filepath.Base(argv[0]) != "curl" {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if arg == "-v" || arg == "--verbose" {
+			return true
+		}
+	}
+	return false
+}
+
+func filterCommandDiagnostics(argv []string, stderr string) string {
+	if !isVerboseCurl(argv) {
+		return stderr
+	}
+	return filterCurlTransportDiagnostics(stderr)
+}
+
+func filterCurlTransportDiagnostics(stderr string) string {
+	var filtered strings.Builder
+	for _, line := range strings.SplitAfter(stderr, "\n") {
+		content := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if strings.HasPrefix(line, "* ") || curlVerboseBodyDiagnostic.MatchString(content) {
+			continue
+		}
+		filtered.WriteString(line)
+	}
+	return filtered.String()
 }
 
 func shellJoin(argv []string) string {

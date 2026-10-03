@@ -25,13 +25,14 @@ const (
 )
 
 var (
-	headerLinePattern = regexp.MustCompile(`^#[ \t]*([^:\r\n]+)([ \t]*:[ \t]*)([^\r\n]*)(\r?)(?:\n)?$`)
-	httpStatusPattern = regexp.MustCompile(`^#[ \t]*HTTP/[0-9.]+[ \t]+([0-9]{3})(?:[ \t]|\r?$)`)
-	rfc3339Pattern    = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})(T)(\d{2}):(\d{2}):(\d{2})(\.(\d+))?(Z|[+-]\d{2}:\d{2})$`)
-	rfc1123Pattern    = regexp.MustCompile(`^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
-	rfc850Pattern     = regexp.MustCompile(`^[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
-	asctimePattern    = regexp.MustCompile(`^[A-Za-z]{3} [A-Za-z]{3} ( {1,2})(\d{1,2}) \d{2}:\d{2}:\d{2} \d{4}$`)
-	durationPart      = regexp.MustCompile(`(?:\d+(?:\.\d+)?|\.\d+)([ \t]*)(ns|us|µs|ms|s|m|h)`)
+	rawHeaderPattern    = regexp.MustCompile(`^([^:\r\n]+)([ \t]*:[ \t]*)([^\r\n]*)(\r?)(?:\n)?$`)
+	rawStatusPattern    = regexp.MustCompile(`^HTTP/[0-9.]+[ \t]+([0-9]{3})(?:[ \t]|\r?$)`)
+	requestStartPattern = regexp.MustCompile(`^> [A-Z]+ [^\r\n]* HTTP/[0-9.]+\r?(?:\n)?$`)
+	rfc3339Pattern      = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})(T)(\d{2}):(\d{2}):(\d{2})(\.(\d+))?(Z|[+-]\d{2}:\d{2})$`)
+	rfc1123Pattern      = regexp.MustCompile(`^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
+	rfc850Pattern       = regexp.MustCompile(`^[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
+	asctimePattern      = regexp.MustCompile(`^[A-Za-z]{3} [A-Za-z]{3} ( {1,2})(\d{1,2}) \d{2}:\d{2}:\d{2} \d{4}$`)
+	durationPart        = regexp.MustCompile(`(?:\d+(?:\.\d+)?|\.\d+)([ \t]*)(ns|us|µs|ms|s|m|h)`)
 )
 
 type comparisonRule struct {
@@ -48,6 +49,7 @@ type transcriptPart struct {
 type outputBlock struct {
 	kind string
 	body string
+	raw  bool
 }
 
 type bodySegment struct {
@@ -107,7 +109,7 @@ func equivalentTranscript(old, current string, rules []extensions.ExampleCompari
 			}
 			continue
 		}
-		if oldPart.block.kind != newPart.block.kind || !equivalentOutputBlock(oldPart.block.body, newPart.block.body, comparisonRules, headerRules) {
+		if oldPart.block.kind != newPart.block.kind || oldPart.block.raw != newPart.block.raw || !equivalentOutputBlock(*oldPart.block, *newPart.block, comparisonRules, headerRules) {
 			return false, nil
 		}
 	}
@@ -190,6 +192,31 @@ func splitTranscript(transcript string) []transcriptPart {
 	parts := make([]transcriptPart, 0)
 	var literal strings.Builder
 	for index := 0; index < len(lines); {
+		if fence, info, found := fenceOpening(lines[index]); found {
+			end := index + 1
+			for end < len(lines) && !fenceClosing(lines[end], fence) {
+				end++
+			}
+			if end == len(lines) {
+				literal.WriteString(lines[index])
+				index++
+				continue
+			}
+			if info != "text" {
+				literal.WriteString(strings.Join(lines[index:end+1], ""))
+				index = end + 1
+				continue
+			}
+			literal.WriteString(lines[index])
+			if literal.Len() != 0 {
+				parts = append(parts, transcriptPart{literal: literal.String()})
+				literal.Reset()
+			}
+			parts = append(parts, transcriptPart{block: &outputBlock{kind: "text", body: strings.Join(lines[index+1:end], ""), raw: true}})
+			literal.WriteString(lines[end])
+			index = end + 1
+			continue
+		}
 		kind, endMarker, isOutput := outputBlockStart(lines[index])
 		if !isOutput {
 			literal.WriteString(lines[index])
@@ -220,6 +247,32 @@ func splitTranscript(transcript string) []transcriptPart {
 	return parts
 }
 
+func fenceOpening(line string) (int, string, bool) {
+	count := 0
+	for count < len(line) && line[count] == '`' {
+		count++
+	}
+	if count < 3 {
+		return 0, "", false
+	}
+	info := strings.TrimSpace(strings.TrimSuffix(line[count:], "\n"))
+	if strings.ContainsRune(info, '`') {
+		return 0, "", false
+	}
+	return count, info, true
+}
+
+func fenceClosing(line string, minimum int) bool {
+	count := 0
+	for count < len(line) && line[count] == '`' {
+		count++
+	}
+	if count < minimum {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimSuffix(line[count:], "\n")) == ""
+}
+
 func outputBlockStart(line string) (kind, endMarker string, found bool) {
 	switch line {
 	case "# Output:\n":
@@ -231,7 +284,7 @@ func outputBlockStart(line string) (kind, endMarker string, found bool) {
 	}
 }
 
-func equivalentOutputBlock(old, current string, rules []comparisonRule, headers map[string]struct{}) bool {
+func equivalentOutputBlock(old, current outputBlock, rules []comparisonRule, headers map[string]struct{}) bool {
 	oldSegments := normalizeOutputBlock(old, rules, headers)
 	newSegments := normalizeOutputBlock(current, rules, headers)
 	if len(oldSegments) != len(newSegments) {
@@ -252,9 +305,10 @@ func equivalentOutputBlock(old, current string, rules []comparisonRule, headers 
 	return true
 }
 
-func normalizeOutputBlock(body string, rules []comparisonRule, headers map[string]struct{}) []bodySegment {
-	captures := headerCaptures(body, headers)
-	raw, positions := rawOutput(body)
+func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map[string]struct{}) []bodySegment {
+	body := block.body
+	captures := headerCaptures(block, headers)
+	raw, positions := rawOutput(block)
 	for _, rule := range rules {
 		for _, match := range rule.pattern.FindAllStringSubmatchIndex(raw, -1) {
 			start, end := match[2*rule.value], match[2*rule.value+1]
@@ -289,7 +343,15 @@ func normalizeOutputBlock(body string, rules []comparisonRule, headers map[strin
 	return segments
 }
 
-func rawOutput(body string) (string, []int) {
+func rawOutput(block outputBlock) (string, []int) {
+	body := block.body
+	if block.raw {
+		positions := make([]int, len(body)+1)
+		for index := range positions {
+			positions[index] = index
+		}
+		return body, positions
+	}
 	lines := make([]transcriptLine, 0)
 	for _, line := range transcriptLines(body) {
 		if !outputMetadataLine(line.text) && (strings.HasPrefix(line.text, "# ") || line.text == "#\n") {
@@ -345,63 +407,24 @@ func outputMetadataLine(line string) bool {
 	return true
 }
 
-func headerCaptures(body string, headers map[string]struct{}) []capture {
-	captures := make([]capture, 0)
+func headerCaptures(block outputBlock, headers map[string]struct{}) []capture {
+	if block.raw {
+		return rawHeaderCaptures(block.body, headers)
+	}
+	return legacyHeaderCaptures(block.body, headers)
+}
+
+func legacyHeaderCaptures(body string, headers map[string]struct{}) []capture {
 	lines := transcriptLines(body)
 	index := nextPayloadLine(lines, 0)
-	if index >= len(lines) || !httpStatusPattern.MatchString(lines[index].text) {
-		return captures
+	if index >= len(lines) {
+		return nil
 	}
-	for index < len(lines) {
-		status := httpStatusPattern.FindStringSubmatch(lines[index].text)
-		if status == nil {
-			return captures
-		}
-		statusCode := status[1]
-		index++
-		for index < len(lines) {
-			line := lines[index]
-			if outputMetadataLine(line.text) {
-				index++
-				continue
-			}
-			if isRenderedBlankLine(line.text) {
-				index = nextPayloadLine(lines, index+1)
-				break
-			}
-			if httpStatusPattern.MatchString(line.text) {
-				return captures
-			}
-			match := headerLinePattern.FindStringSubmatchIndex(line.text)
-			if match != nil {
-				nameStart, nameEnd := match[2], match[3]
-				name := strings.ToLower(line.text[nameStart:nameEnd])
-				_, found := headers[name]
-				if found {
-					valueStart, valueEnd := match[6], match[7]
-					valueText := line.text[valueStart:valueEnd]
-					var value normalizedValue
-					var ok bool
-					if name == "date" {
-						value, ok = normalizeValue(dateRuleType, valueText)
-					} else {
-						value, ok = inferValue(valueText)
-					}
-					if ok {
-						captures = append(captures, capture{start: line.offset + valueStart, end: line.offset + valueEnd, value: value})
-					}
-				}
-			}
-			index++
-		}
-		if statusCode != "100" && statusCode != "102" && statusCode != "103" {
-			return captures
-		}
-		if index >= len(lines) || !httpStatusPattern.MatchString(lines[index].text) {
-			return captures
-		}
+	status, ok := responseLine(lines[index], "# ")
+	if !ok || !rawStatusPattern.MatchString(status) {
+		return nil
 	}
-	return captures
+	return responseHeaderCaptures(lines, index, "# ", headers)
 }
 
 func nextPayloadLine(lines []transcriptLine, index int) int {
@@ -411,8 +434,95 @@ func nextPayloadLine(lines []transcriptLine, index int) int {
 	return index
 }
 
-func isRenderedBlankLine(line string) bool {
-	return line == "#\n" || line == "# \n" || line == "# \r\n"
+func rawHeaderCaptures(body string, headers map[string]struct{}) []capture {
+	lines := transcriptLines(body)
+	if len(lines) == 0 {
+		return nil
+	}
+	if rawStatusPattern.MatchString(lines[0].text) {
+		return responseHeaderCaptures(lines, 0, "", headers)
+	}
+	if !requestStartPattern.MatchString(lines[0].text) {
+		return nil
+	}
+	index := 1
+	for index < len(lines) {
+		line := lines[index].text
+		if line == ">\n" || line == "> \n" {
+			index++
+			break
+		}
+		if !strings.HasPrefix(line, "> ") || rawHeaderPattern.FindStringSubmatchIndex(line[2:]) == nil {
+			return nil
+		}
+		index++
+	}
+	if index >= len(lines) || !strings.HasPrefix(lines[index].text, "< ") || !rawStatusPattern.MatchString(lines[index].text[2:]) {
+		return nil
+	}
+	return responseHeaderCaptures(lines, index, "< ", headers)
+}
+
+func responseHeaderCaptures(lines []transcriptLine, index int, prefix string, headers map[string]struct{}) []capture {
+	captures := make([]capture, 0)
+	for index < len(lines) {
+		status, ok := responseLine(lines[index], prefix)
+		if !ok {
+			return captures
+		}
+		statusMatch := rawStatusPattern.FindStringSubmatch(status)
+		if statusMatch == nil {
+			return captures
+		}
+		statusCode := statusMatch[1]
+		index++
+		for index < len(lines) {
+			text, ok := responseLine(lines[index], prefix)
+			if !ok {
+				return captures
+			}
+			if text == "\n" || text == "\r\n" || text == "" {
+				index++
+				break
+			}
+			match := rawHeaderPattern.FindStringSubmatchIndex(text)
+			if match == nil {
+				return captures
+			}
+			nameStart, nameEnd := match[2], match[3]
+			name := strings.ToLower(text[nameStart:nameEnd])
+			if _, found := headers[name]; found {
+				valueStart, valueEnd := match[6], match[7]
+				valueText := text[valueStart:valueEnd]
+				value, valid := inferHeaderValue(name, valueText)
+				if valid {
+					captures = append(captures, capture{start: lines[index].offset + len(prefix) + valueStart, end: lines[index].offset + len(prefix) + valueEnd, value: value})
+				}
+			}
+			index++
+		}
+		if statusCode != "100" && statusCode != "102" && statusCode != "103" {
+			return captures
+		}
+	}
+	return captures
+}
+
+func responseLine(line transcriptLine, prefix string) (string, bool) {
+	if (prefix == "# " && line.text == "#\n") || (prefix == "< " && line.text == "<\n") {
+		return "\n", true
+	}
+	if !strings.HasPrefix(line.text, prefix) {
+		return "", false
+	}
+	return line.text[len(prefix):], true
+}
+
+func inferHeaderValue(name, value string) (normalizedValue, bool) {
+	if name == "date" {
+		return normalizeValue(dateRuleType, value)
+	}
+	return inferValue(value)
 }
 
 func inferValue(value string) (normalizedValue, bool) {

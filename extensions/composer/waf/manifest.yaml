@@ -103,36 +103,7 @@ longDescription: |
   |--------|------|------|-------------|
   | `waf_tx_total` | - | Counter | Total amount of transactions processed by the WAF. |
   | `waf_tx_blocked` | `authority`, `phase`, `rule_id` | Counter | Total amount of transactions blocked by the WAF. The `rule_id` will not be set if the request is not blocked by a concrete rule but by a WAF internal error. |
-  | `waf_tx_duration` | - | Histogram | Duration of WAF processing the transaction, in microseconds. |
-
-  ### Histogram resolution
-
-  Envoy records dynamic-module histograms without a unit, so its default bucket
-  bounds apply verbatim to the microsecond values of `waf_tx_duration`. Two
-  consequences:
-
-  - Typical CRS evaluation lands in the ~0.5–10 ms range, which the default
-    bounds cover with only five buckets (`500, 1000, 2500, 5000, 10000`).
-  - The largest finite bound is 3,600,000 µs (3.6 s). `_sum`/`_count` and the
-    admin-interface quantiles stay correct above it, but PromQL's
-    `histogram_quantile()` clamps any quantile falling past the last finite
-    bound to that bound.
-
-  Both can be tuned in the Envoy bootstrap configuration, without touching the
-  extension. Two details about the matcher, both of which fail silently when
-  missed: it sees the stat name before tag extraction, i.e. with the
-  `dynamicmodulescustom.` prefix, and `safe_regex` is matched against the whole
-  name — hence the leading `.*` below.
-
-  ```yaml
-  stats_config:
-    histogram_bucket_settings:
-      - match:
-          safe_regex:
-            regex: ".*waf_tx_duration"
-        # Sharper resolution across typical CRS latencies; ceiling at 10 s.
-        buckets: [100, 250, 500, 750, 1000, 1500, 2500, 5000, 10000, 25000, 100000, 1000000, 10000000]
-  ```
+  | `waf_tx_duration` | - | Histogram | Duration of WAF processing the transaction, in milliseconds. |
 
   ## Per Route Configuration
 
@@ -180,37 +151,20 @@ examples:
           - "1%27%20ORDER%20BY%203--%2B"
           - "${PROXY_URL}/post"
     code: |
-      # Local upstream (started by this generator)
-      # Run the following commands from the repository root.
-      $ export PROXY_URL='http://127.0.0.1:10000'
-      $ export ADMIN_URL='http://127.0.0.1:9901'
-      $ export UPSTREAM_ADDRESS='127.0.0.1:10001'
-      $ export WORK_DIR="$(mktemp -d)"
-      $ go run ./cli/tools/gen-examples -serve-upstream -upstream-address "${UPSTREAM_ADDRESS}" &
-      $ UPSTREAM_PID=$!
+      # Terminal 1 (from the repository root)
+      $ boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '{"directives":["Include @coraza.conf","SecRuleEngine On","SecResponseBodyAccess Off","Include @crs-setup.conf","Include @owasp_crs/*.conf"]}'
 
-      # Start Envoy
-      $ boe run --local extensions/composer/waf --listen-port "${PROXY_URL##*:}" --admin-port "${ADMIN_URL##*:}" --envoy-version 1.38.0 --cluster-insecure "${UPSTREAM_ADDRESS}" --test-upstream-cluster "${UPSTREAM_ADDRESS}" --config '{"directives":["Include @coraza.conf","SecRuleEngine On","SecResponseBodyAccess Off","Include @crs-setup.conf","Include @owasp_crs/*.conf"]}' &
-      $ BOE_PID=$!
-      $ for i in $(seq 1 300); do
-          [ "$(curl --silent --max-time 1 "${ADMIN_URL}/ready" || true)" = LIVE ] && break
-          sleep 0.1
-        done
-      $ cd "${WORK_DIR}"
-
-      $ curl --silent --show-error --include --max-time 10 --request POST --data '1%27%20ORDER%20BY%203--%2B' "${PROXY_URL}"/post
+      # Terminal 2 (after Envoy is ready, from the repository root)
+      $ curl --silent --show-error --include --max-time 10 --request POST --data '1%27%20ORDER%20BY%203--%2B' http://localhost:10000/post
       # Output:
       # HTTP/1.1 403 Forbidden
-      # date: Sat, 03 Oct 2026 07:40:18 GMT
+      # date: Sat, 03 Oct 2026 09:44:12 GMT
       # server: envoy
       # content-length: 0
       #
       # Line endings: CRLF,CRLF,CRLF,CRLF,CRLF
       # End output
 
-      $ cd - >/dev/null
-      $ kill "${BOE_PID}" "${UPSTREAM_PID}"
-      $ rm -rf "${WORK_DIR}"
   - title: CRS plugin from local filesystem
     description: |
       The following example demonstrates how to load a CRS plugin from the local filesystem and run the WAF plugin
