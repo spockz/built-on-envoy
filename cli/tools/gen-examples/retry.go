@@ -79,104 +79,35 @@ func retryCaptureMode(argv []string) (retryCapture, error) {
 		hasGlobURL             bool
 		globOff                bool
 		suppressConnectHeaders bool
-		endOfOptions           bool
 	)
-	for index := 1; index < len(argv); index++ {
-		arg := argv[index]
-		if endOfOptions {
-			if err := addRetryURL(arg, &urlCount, &hasHTTPSURL, &hasGlobURL); err != nil {
+	options, err := parseRetryOptions(argv[1:])
+	if err != nil {
+		return retryCapture{}, err
+	}
+	for _, option := range options {
+		switch option.name {
+		case "", "--url":
+			if err := addRetryURL(option.value, &urlCount, &hasHTTPSURL, &hasGlobURL); err != nil {
 				return retryCapture{}, err
 			}
-			continue
-		}
-		if arg == "--" {
-			endOfOptions = true
-			continue
-		}
-		if strings.HasPrefix(arg, "--") {
-			name, value, hasValue := splitRetryLongOption(arg)
-			switch name {
-			case "--include":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-				capture.include = true
-			case "--verbose":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-				capture.verbose = true
-			case "--disable":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-			case "--suppress-connect-headers":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-				suppressConnectHeaders = true
-			case "--output":
-				var err error
-				value, index, err = retryOptionValue(argv, index, arg, value, hasValue)
-				if err != nil {
-					return retryCapture{}, err
-				}
-				if hasOutput {
-					return retryCapture{}, fmt.Errorf("retry does not support multiple curl --output options")
-				}
-				hasOutput, output = true, value
-			case "--write-out":
-				var err error
-				value, index, err = retryOptionValue(argv, index, arg, value, hasValue)
-				if err != nil {
-					return retryCapture{}, err
-				}
-				if hasWriteOut {
-					return retryCapture{}, fmt.Errorf("retry does not support multiple curl --write-out options")
-				}
-				hasWriteOut, writeOut = true, value
-				capture.writeOut = true
-			case "--url":
-				var err error
-				value, index, err = retryOptionValue(argv, index, arg, value, hasValue)
-				if err != nil {
-					return retryCapture{}, err
-				}
-				if err := addRetryURL(value, &urlCount, &hasHTTPSURL, &hasGlobURL); err != nil {
-					return retryCapture{}, err
-				}
-			case "--location", "--location-trusted", "--next", "--parallel", "--config", "--head", "--http0.9", "--stderr", "--trace", "--trace-ascii", "--proxytunnel", "--proxy-tunnel", "--retry", "--retry-delay", "--retry-max-time":
-				return retryCapture{}, fmt.Errorf("retry does not support curl option %s because it makes status capture ambiguous", name)
-			case "--globoff":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-				globOff = true
-			case "--silent", "--show-error", "--insecure", "--fail", "--fail-with-body", "--get", "--compressed", "--path-as-is", "--http1.0", "--http1.1", "--http2", "--http2-prior-knowledge", "--ipv4", "--ipv6", "--no-alpn", "--no-npn":
-				if hasValue {
-					return retryCapture{}, retryUnsupportedOption(arg)
-				}
-			case "--user-agent", "--max-time", "--connect-timeout", "--request", "--header", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode", "--json", "--form", "--form-string", "--cookie", "--cookie-jar", "--referer", "--proxy", "--noproxy", "--user", "--proxy-user", "--cacert", "--cert", "--key", "--resolve", "--connect-to", "--range", "--request-target", "--tls-max", "--proto", "--proto-redir", "--interface", "--local-port", "--limit-rate", "--expect100-timeout", "--oauth2-bearer":
-				var err error
-				_, index, err = retryOptionValue(argv, index, arg, value, hasValue)
-				if err != nil {
-					return retryCapture{}, err
-				}
-			default:
-				return retryCapture{}, retryUnsupportedOption(name)
+		case "--include":
+			capture.include = true
+		case "--verbose":
+			capture.verbose = true
+		case "--suppress-connect-headers":
+			suppressConnectHeaders = true
+		case "--globoff":
+			globOff = true
+		case "--output":
+			if hasOutput {
+				return retryCapture{}, fmt.Errorf("retry does not support multiple curl --output options")
 			}
-			continue
-		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			var err error
-			index, err = retryShortOptions(argv, index, arg, &capture, &globOff, &hasOutput, &output, &hasWriteOut, &writeOut)
-			if err != nil {
-				return retryCapture{}, err
+			hasOutput, output = true, option.value
+		case "--write-out":
+			if hasWriteOut {
+				return retryCapture{}, fmt.Errorf("retry does not support multiple curl --write-out options")
 			}
-			continue
-		}
-		if err := addRetryURL(arg, &urlCount, &hasHTTPSURL, &hasGlobURL); err != nil {
-			return retryCapture{}, err
+			hasWriteOut, writeOut, capture.writeOut = true, option.value, true
 		}
 	}
 
@@ -209,74 +140,96 @@ func retryCaptureMode(argv []string) (retryCapture, error) {
 	return capture, nil
 }
 
-func splitRetryLongOption(arg string) (string, string, bool) {
-	name, value, found := strings.Cut(arg, "=")
-	return name, value, found
+type retryOption struct {
+	name  string
+	value string
+}
+
+// Short clusters and long options share validation after aliases are expanded.
+// Value-taking short options consume the rest of their cluster, as curl does.
+func parseRetryOptions(argv []string) ([]retryOption, error) {
+	var options []retryOption
+	endOfOptions := false
+	for index := 0; index < len(argv); index++ {
+		arg := argv[index]
+		if endOfOptions || !strings.HasPrefix(arg, "-") || arg == "-" {
+			options = append(options, retryOption{value: arg})
+			continue
+		}
+		if arg == "--" {
+			endOfOptions = true
+			continue
+		}
+		long := strings.HasPrefix(arg, "--")
+		for position := 1; position < len(arg); position++ {
+			var name, value, spelling string
+			var hasValue bool
+			if long {
+				name, value, hasValue = strings.Cut(arg, "=")
+				spelling = arg
+			} else {
+				spelling = "-" + string(arg[position])
+				name = retryShortOptionNames[arg[position]]
+				if name == "" {
+					return nil, retryUnsupportedOption(spelling)
+				}
+			}
+			takesValue, err := retryOptionTakesValue(name, spelling)
+			if err != nil {
+				return nil, err
+			}
+			if takesValue {
+				if !long && position+1 < len(arg) {
+					value, hasValue = arg[position+1:], true
+				}
+				value, index, err = retryOptionValue(argv, index, spelling, value, hasValue)
+				if err != nil {
+					return nil, err
+				}
+			} else if hasValue {
+				return nil, retryUnsupportedOption(spelling)
+			}
+			options = append(options, retryOption{name: name, value: value})
+			if long || takesValue {
+				break
+			}
+		}
+	}
+	return options, nil
+}
+
+// Short-only options stay distinct so normalization cannot admit new long spellings.
+var retryShortOptionNames = map[byte]string{
+	'q': "--disable", 's': "--silent", 'S': "--show-error", 'k': "--insecure",
+	'f': "--fail", 'G': "--get", 'g': "--globoff", 'i': "--include", 'v': "--verbose",
+	'I': "--head", 'L': "--location", 'Z': "--parallel", 'K': "--config",
+	'D': "-D", 'p': "--proxytunnel", 'o': "--output", 'w': "--write-out",
+	'A': "--user-agent", 'm': "--max-time", 'X': "--request", 'H': "--header",
+	'd': "--data", 'F': "--form", 'b': "--cookie", 'c': "--cookie-jar",
+	'e': "--referer", 'x': "--proxy", 'u': "--user", 'U': "--proxy-user",
+	'E': "--cert", 'r': "--range", 'T': "-T",
+}
+
+func retryOptionTakesValue(name, spelling string) (bool, error) {
+	switch name {
+	case "--include", "--verbose", "--disable", "--suppress-connect-headers", "--globoff",
+		"--silent", "--show-error", "--insecure", "--fail", "--fail-with-body", "--get", "--compressed", "--path-as-is", "--http1.0", "--http1.1", "--http2", "--http2-prior-knowledge", "--ipv4", "--ipv6", "--no-alpn", "--no-npn":
+		return false, nil
+	case "--output", "--write-out", "--url",
+		"--user-agent", "--max-time", "--connect-timeout", "--request", "--header", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode", "--json", "--form", "--form-string", "--cookie", "--cookie-jar", "--referer", "--proxy", "--noproxy", "--user", "--proxy-user", "--cacert", "--cert", "--key", "--resolve", "--connect-to", "--range", "--request-target", "--tls-max", "--proto", "--proto-redir", "--interface", "--local-port", "--limit-rate", "--expect100-timeout", "--oauth2-bearer", "-T":
+		return true, nil
+	case "--location", "--location-trusted", "--next", "--parallel", "--config", "--head", "--http0.9", "--stderr", "--trace", "--trace-ascii", "--proxytunnel", "--proxy-tunnel", "--retry", "--retry-delay", "--retry-max-time", "-D":
+		return false, fmt.Errorf("retry does not support curl option %s because it makes status capture ambiguous", spelling)
+	default:
+		return false, retryUnsupportedOption(spelling)
+	}
 }
 
 func retryOptionValue(argv []string, index int, option, value string, hasValue bool) (string, int, error) {
-	if hasValue {
-		if value == "" {
-			return "", index, fmt.Errorf("curl option %s requires a value", option)
-		}
+	if hasValue && value != "" {
 		return value, index, nil
 	}
-	if index+1 >= len(argv) {
-		return "", index, fmt.Errorf("curl option %s requires a value", option)
-	}
-	return argv[index+1], index + 1, nil
-}
-
-func retryShortOptions(argv []string, index int, arg string, capture *retryCapture, globOff *bool, hasOutput *bool, output *string, hasWriteOut *bool, writeOut *string) (int, error) {
-	for position := 1; position < len(arg); position++ {
-		switch arg[position] {
-		case 's', 'S', 'k', 'f', 'G', 'q':
-		case 'g':
-			*globOff = true
-		case 'i':
-			capture.include = true
-		case 'v':
-			capture.verbose = true
-		case 'I', 'L', 'Z', 'K', 'D', 'p':
-			return index, fmt.Errorf("retry does not support curl option -%c because it makes status capture ambiguous", arg[position])
-		case 'A', 'm', 'X', 'H', 'd', 'F', 'b', 'c', 'e', 'x', 'u', 'U', 'E', 'r', 'T':
-			_, next, err := retryShortValue(argv, index, arg, position, "")
-			return next, err
-		case 'o':
-			value, next, err := retryShortValue(argv, index, arg, position, "-o")
-			if err != nil {
-				return index, err
-			}
-			if *hasOutput {
-				return index, fmt.Errorf("retry does not support multiple curl --output options")
-			}
-			*hasOutput, *output = true, value
-			return next, nil
-		case 'w':
-			value, next, err := retryShortValue(argv, index, arg, position, "-w")
-			if err != nil {
-				return index, err
-			}
-			if *hasWriteOut {
-				return index, fmt.Errorf("retry does not support multiple curl --write-out options")
-			}
-			*hasWriteOut, *writeOut, capture.writeOut = true, value, true
-			return next, nil
-		default:
-			return index, retryUnsupportedOption("-" + string(arg[position]))
-		}
-	}
-	return index, nil
-}
-
-func retryShortValue(argv []string, index int, arg string, position int, option string) (string, int, error) {
-	if position+1 < len(arg) {
-		return arg[position+1:], index, nil
-	}
-	if index+1 >= len(argv) {
-		if option == "" {
-			option = "-" + string(arg[position])
-		}
+	if hasValue || index+1 >= len(argv) {
 		return "", index, fmt.Errorf("curl option %s requires a value", option)
 	}
 	return argv[index+1], index + 1, nil
