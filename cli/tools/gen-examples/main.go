@@ -19,14 +19,12 @@ import (
 )
 
 type options struct {
-	extensions      stringList
-	boe             string
-	envoyVersion    string
-	envoyPath       string
-	check           bool
-	timeout         time.Duration
-	serveUpstream   bool
-	upstreamAddress string
+	extensions   stringList
+	boe          string
+	envoyVersion string
+	envoyPath    string
+	check        bool
+	timeout      time.Duration
 }
 
 type stringList []string
@@ -49,11 +47,9 @@ func run() int {
 	flag.StringVar(&opts.envoyPath, "envoy-path", "", "path to an Envoy binary")
 	flag.BoolVar(&opts.check, "check", false, "fail if generated examples differ without writing files")
 	flag.DurationVar(&opts.timeout, "timeout", 2*time.Minute, "timeout for each example command and Envoy startup")
-	flag.BoolVar(&opts.serveUpstream, "serve-upstream", false, "start a local httpbin upstream")
-	flag.StringVar(&opts.upstreamAddress, "upstream-address", "127.0.0.1:10001", "address for the local httpbin upstream")
 	flag.Parse()
 
-	if len(opts.extensions) == 0 && !opts.serveUpstream {
+	if len(opts.extensions) == 0 {
 		fmt.Fprintln(os.Stderr, "-extension is required")
 		return 2
 	}

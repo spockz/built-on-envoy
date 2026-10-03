@@ -23,6 +23,49 @@ func TestEquivalentTranscriptHTTPDateHeader(t *testing.T) {
 	require.True(t, equivalent)
 }
 
+func TestEquivalentTranscriptFencedTextResponseHeaders(t *testing.T) {
+	old := fencedText("HTTP/1.1 200 OK\nDate: Mon, 02 Jan 2006 15:04:05 GMT\nX-Latency: 12.3ms\n\nbody\n", "<!-- stdout; Line endings: LF,LF,LF,LF,LF -->\n", "```")
+	current := fencedText("HTTP/1.1 200 OK\nDate: Tue, 03 Jan 2006 16:05:06 GMT\nX-Latency: 98.7ms\n\nbody\n", "<!-- stdout; Line endings: LF,LF,LF,LF,LF -->\n", "```")
+
+	equivalent, err := equivalentTranscript(old, current, nil, []string{"x-latency"})
+	require.NoError(t, err)
+	require.True(t, equivalent)
+
+	current = fencedText("HTTP/1.1 200 OK\nDate: Tue, 03 Jan 2006 16:05:06 GMT\nX-Latency: 98.7ms\n\nbody\n", "<!-- stdout; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF -->\n", "```")
+	equivalent, err = equivalentTranscript(old, current, nil, []string{"x-latency"})
+	require.NoError(t, err)
+	require.False(t, equivalent, "metadata is part of the displayed transcript")
+}
+
+func TestEquivalentTranscriptFencedVerboseResponseScope(t *testing.T) {
+	old := fencedText("> GET / HTTP/1.1\n> Host: example.test\n> User-Agent: boe-example\n>\n< HTTP/1.1 200 OK\n< Date: Mon, 02 Jan 2006 15:04:05 GMT\n< X-Latency: 12ms\n<\n< HTTP/1.1 200 OK\n< Date: Mon, 02 Jan 2006 15:04:05 GMT\n", "<!-- stderr; Line endings: LF,LF,LF,LF,LF,LF,LF,LF,LF,LF -->\n", "````")
+	current := fencedText("> GET / HTTP/1.1\n> Host: example.test\n> User-Agent: boe-example\n>\n< HTTP/1.1 200 OK\n< Date: Tue, 03 Jan 2006 16:05:06 GMT\n< X-Latency: 98ms\n<\n< HTTP/1.1 200 OK\n< Date: Wed, 04 Jan 2006 17:06:07 GMT\n", "<!-- stderr; Line endings: LF,LF,LF,LF,LF,LF,LF,LF,LF,LF -->\n", "````")
+
+	equivalent, err := equivalentTranscript(old, current, nil, []string{"x-latency"})
+	require.NoError(t, err)
+	require.False(t, equivalent, "a status-like body line remains literal")
+
+	current = fencedText("> GET / HTTP/1.1\n> Host: example.test\n> User-Agent: other-agent\n>\n< HTTP/1.1 200 OK\n< Date: Tue, 03 Jan 2006 16:05:06 GMT\n< X-Latency: 98ms\n<\n< HTTP/1.1 200 OK\n< Date: Mon, 02 Jan 2006 15:04:05 GMT\n", "<!-- stderr; Line endings: LF,LF,LF,LF,LF,LF,LF,LF,LF,LF -->\n", "````")
+	equivalent, err = equivalentTranscript(old, current, nil, []string{"x-latency"})
+	require.NoError(t, err)
+	require.False(t, equivalent, "outgoing request lines remain literal")
+}
+
+func TestEquivalentTranscriptFencedTextCustomRulesAndFenceSyntax(t *testing.T) {
+	rules := []extensions.ExampleComparisonRule{{Type: durationRuleType, Pattern: `(?m)^latency: (?P<value>\S+)$`}}
+	old := "```sh\n$ curl --verbose\n```\n" + fencedText("latency: 12.3ms\n", "<!-- stdout; Line endings: LF -->\n", "```")
+	current := "```sh\n$ curl --verbose\n```\n" + fencedText("latency: 98.7ms\n", "<!-- stdout; Line endings: LF -->\n", "```")
+
+	equivalent, err := equivalentTranscript(old, current, rules, nil)
+	require.NoError(t, err)
+	require.True(t, equivalent)
+
+	current = "```sh\n$ curl --verbose\n```\n" + fencedText("latency: 98.7ms\n", "<!-- stdout; Line endings: LF -->\n", "````")
+	equivalent, err = equivalentTranscript(old, current, rules, nil)
+	require.NoError(t, err)
+	require.False(t, equivalent, "fence syntax is visible transcript formatting")
+}
+
 func TestEquivalentTranscriptHTTPDateHeaderPreservesSyntax(t *testing.T) {
 	old := renderedOutput("# HTTP/1.1 200 OK\n# Date: Mon, 02 Jan 2006 15:04:05 GMT\n# \n")
 	current := renderedOutput("# HTTP/1.1 200 OK\n# Date: 2006-01-03T16:05:06Z\n# \n")
@@ -304,4 +347,8 @@ func renderedOutput(body string) string {
 
 func renderedStderr(body string) string {
 	return "# Stderr:\n" + body + "# End output\n"
+}
+
+func fencedText(body, metadata, fence string) string {
+	return fence + "text\n" + body + fence + "\n" + metadata
 }

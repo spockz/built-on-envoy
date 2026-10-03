@@ -117,7 +117,7 @@ examples:
     description: |
       Run the OPA extension with a simple Rego policy that allows or denies
       requests based on the request path. The inline policy allows requests
-      to the local test upstream's status endpoints and denies other paths.
+      to the default httpbin upstream's status endpoints and denies other paths.
     config:
       policies:
         - inline: |
@@ -129,59 +129,64 @@ examples:
               input.parsed_path[0] == "status"
             }
     commands:
-      - argv: [curl, --silent, --show-error, --include, --max-time, "10", "${PROXY_URL}/status/200"]
-      - argv: [curl, --silent, --show-error, --include, --max-time, "10", "${PROXY_URL}/private/resource"]
+      - argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/status/200"]
+      - argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/private/resource"]
     volatileHeaders:
       - x-envoy-upstream-service-time
     code: |
-      # Local upstream (started by this generator)
-      # Run the following commands from the repository root.
-      $ export PROXY_URL='http://127.0.0.1:10000'
-      $ export ADMIN_URL='http://127.0.0.1:9901'
-      $ export UPSTREAM_ADDRESS='127.0.0.1:10001'
-      $ export WORK_DIR="$(mktemp -d)"
-      $ go run ./cli/tools/gen-examples -serve-upstream -upstream-address "${UPSTREAM_ADDRESS}" &
-      $ UPSTREAM_PID=$!
+      ```sh
+      # Terminal 1 (from the repository root)
+      boe run --local extensions/composer/opa --envoy-version 1.38.0 --config '{"policies":[{"inline":"package envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"status\"\n}\n"}]}'
+      ```
 
-      # Start Envoy
-      $ boe run --local extensions/composer/opa --listen-port "${PROXY_URL##*:}" --admin-port "${ADMIN_URL##*:}" --envoy-version 1.38.0 --cluster-insecure "${UPSTREAM_ADDRESS}" --test-upstream-cluster "${UPSTREAM_ADDRESS}" --config '{"policies":[{"inline":"package envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"status\"\n}\n"}]}' &
-      $ BOE_PID=$!
-      $ for i in $(seq 1 300); do
-          [ "$(curl --silent --max-time 1 "${ADMIN_URL}/ready" || true)" = LIVE ] && break
-          sleep 0.1
-        done
-      $ cd "${WORK_DIR}"
+      ```sh
+      # Terminal 2 (after Envoy is ready, from the repository root)
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 http://localhost:10000/status/200
+      ```
 
-      $ curl --silent --show-error --include --max-time 10 "${PROXY_URL}"/status/200
-      # Output:
-      # HTTP/1.1 200 OK
-      # access-control-allow-credentials: true
-      # access-control-allow-origin: *
-      # content-type: text/plain; charset=utf-8
-      # date: Sat, 03 Oct 2026 07:40:16 GMT
-      # content-length: 0
-      # x-envoy-upstream-service-time: 0
-      # server: envoy
-      #
-      # Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF
-      # End output
+      ```text
+      > GET /status/200 HTTP/1.1
+      > Host: localhost:10000
+      > User-Agent: boe-example
+      > Accept: */*
+      >
+      < HTTP/1.1 200 OK
+      < date: Sat, 03 Oct 2026 10:05:41 GMT
+      < content-type: text/html; charset=utf-8
+      < content-length: 0
+      < server: envoy
+      < access-control-allow-origin: *
+      < access-control-allow-credentials: true
+      < x-envoy-upstream-service-time: 389
+      <
+      ```
+      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjEzLCJ0ZXh0IjoiICJ9XQ== -->
 
-      $ curl --silent --show-error --include --max-time 10 "${PROXY_URL}"/private/resource
-      # Output:
-      # HTTP/1.1 403 Forbidden
-      # content-length: 9
-      # content-type: text/plain
-      # date: Sat, 03 Oct 2026 07:40:16 GMT
-      # server: envoy
-      #
-      # Forbidden
-      # Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF
-      # No trailing newline
-      # End output
 
-      $ cd - >/dev/null
-      $ kill "${BOE_PID}" "${UPSTREAM_PID}"
-      $ rm -rf "${WORK_DIR}"
+      ```sh
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 http://localhost:10000/private/resource
+      ```
+
+      ```text
+      Forbidden
+      ```
+      <!-- stdout; No trailing newline -->
+
+
+      ```text
+      > GET /private/resource HTTP/1.1
+      > Host: localhost:10000
+      > User-Agent: boe-example
+      > Accept: */*
+      >
+      < HTTP/1.1 403 Forbidden
+      < content-length: 9
+      < content-type: text/plain
+      < date: Sat, 03 Oct 2026 10:05:41 GMT
+      < server: envoy
+      <
+      ```
+      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjEwLCJ0ZXh0IjoiICJ9XQ== -->
   - title: Custom Deny Response
     description: |
       Use a policy that returns a structured object with custom HTTP status,
