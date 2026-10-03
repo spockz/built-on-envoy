@@ -103,7 +103,7 @@ Commands executed sequentially against the running extension to generate code.
 
 | | |
 |---|---|
-| **Type** | `[]object` |
+| **Type** | [[]exampleCommand](#reference-exampleCommand) |
 | **Required** | No |
 | **Min items** | 1 |
 
@@ -146,6 +146,20 @@ Explanation of what the example demonstrates.
 | **Type** | `string` |
 | **Required** | Yes |
 | **Min length** | 1 |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference)
+
+
+
+#### examples.preStart
+
+Commands executed sequentially before starting the extension.
+
+| | |
+|---|---|
+| **Type** | [[]exampleCommand](#reference-exampleCommand) |
+| **Required** | No |
+| **Min items** | 1 |
 
 [↑ Top](#) | [↑ Extension Manifest](#reference)
 
@@ -479,4 +493,57 @@ Semantic version of the extension. Required unless the `parent` field is set.
 | **Forbidden when** | `parent` is set |
 | **Required when** | `parent` is not set |
 
-[↑ Top](#) | [↑ Extension Manifest](#reference) {/* if .SubProperties */} {/* range .Properties */} {/* if .CustomTypes */} {/* range . */}
+[↑ Top](#) | [↑ Extension Manifest](#reference) {/* if .SubProperties */} {/* range .Properties */}
+
+
+
+<a id="reference-exampleCommand"></a>
+### Custom type: exampleCommand
+
+
+
+#### argv
+
+Executable and arguments, without shell evaluation. Supports PROXY_URL, ADMIN_URL, UPSTREAM_ADDRESS, and WORK_DIR placeholders in `${NAME}` form.
+
+| | |
+|---|---|
+| **Type** | `[]string` |
+| **Required** | Yes |
+| **Min items** | 1 |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference)
+
+#### comment
+
+Comment explaining the command.
+
+| | |
+|---|---|
+| **Type** | `string` |
+| **Required** | No |
+| **Min length** | 1 |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference)
+
+#### expectedExit
+
+Expected command exit code. Defaults to zero; HTTP denial responses do not normally cause curl to fail.
+
+| | |
+|---|---|
+| **Type** | `integer` |
+| **Required** | No |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference)
+
+#### retry
+
+Repeat a single curl request until it returns the selected HTTP status, within a bounded number of attempts.
+
+| | |
+|---|---|
+| **Type** | `object` |
+| **Required** | No |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference) {/* range .Properties */} {/* range .CustomTypes */} {/* if .CustomTypes */} {/* range . */}

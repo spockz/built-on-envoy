@@ -29,6 +29,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pmezard/go-difflib/difflib"
 	"gopkg.in/yaml.v3"
@@ -45,6 +46,13 @@ type manifestChange struct {
 	path string
 	old  []byte
 	data []byte
+}
+
+type commandTranscript struct {
+	displayed      string
+	output         []string
+	stdout         string
+	filteredStderr string
 }
 
 func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (returnErr error) {
@@ -348,6 +356,10 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	}
 	// Commands run after the optional Terminal 2 cd, so their work directory is always `.`.
 	displayCommandValues["WORK_DIR"] = "."
+	displayPreStartValues := make(map[string]string, len(displayConfigValues))
+	for key, value := range displayConfigValues {
+		displayPreStartValues[key] = value
+	}
 	outputActualValues := make(map[string]string, len(values)+2)
 	for key, value := range values {
 		outputActualValues[key] = value
@@ -360,6 +372,11 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	}
 	outputDisplayValues["ADMIN_AUTHORITY"] = "127.0.0.1:9901"
 	outputDisplayValues["PROXY_AUTHORITY"] = "localhost:10000"
+	preStartOutputDisplayValues := make(map[string]string, len(outputDisplayValues))
+	for key, value := range outputDisplayValues {
+		preStartOutputDisplayValues[key] = value
+	}
+	preStartOutputDisplayValues["WORK_DIR"] = fixturePath
 	configJSON := ""
 	displayConfigJSON := ""
 	if example.Config != nil {
@@ -376,7 +393,7 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		if displayErr != nil {
 			return "", fmt.Errorf("expand displayed config: %w", displayErr)
 		}
-		displayConfigJSON, displayErr = stableJSON(displayConfig)
+		displayConfigJSON, displayErr = formatDisplayJSON(displayConfig)
 		if displayErr != nil {
 			return "", fmt.Errorf("encode displayed config: %w", displayErr)
 		}
@@ -400,23 +417,28 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		transcriptArgs = append(transcriptArgs, "--config", displayConfigJSON)
 	}
 	var transcript strings.Builder
-	var terminalOne strings.Builder
-	terminalOne.WriteString("# Terminal 1 (from the repository root)\n")
-	if opts.envoyPath != "" {
-		terminalOne.WriteString("# Replace /path/to/envoy with a compatible Envoy binary.\n")
-	}
-	terminalOne.WriteString("boe " + shellJoin(transcriptArgs) + "\n")
-	transcript.WriteString(renderFencedBlock("sh", terminalOne.String()))
 	var terminalTwoPrefix strings.Builder
 	terminalTwoPrefix.WriteString("# Terminal 2 (after Envoy is ready, from the repository root)\n")
 	if hasFixtures(extensionPath) {
-		terminalTwoPrefix.WriteString("cd " + shellQuote(fixturePath) + "\n")
-	}
-	type commandTranscript struct {
-		displayed string
-		output    []string
+		terminalTwoPrefix.WriteString(formatShellCommand([]string{"cd", fixturePath}) + "\n")
 	}
 	commandTranscripts := make([]commandTranscript, 0, len(example.Commands))
+	preStartTranscripts := make([]commandTranscript, 0, len(example.PreStart))
+	for i, command := range example.PreStart {
+		argv, argvErr := expandArgv(command.Argv, values)
+		if argvErr != nil {
+			return "", fmt.Errorf("pre-start command %d: %w", i+1, argvErr)
+		}
+		displayArgv, displayArgvErr := expandArgv(command.Argv, displayPreStartValues)
+		if displayArgvErr != nil {
+			return "", fmt.Errorf("display pre-start command %d: %w", i+1, displayArgvErr)
+		}
+		result, commandErr := executeExampleCommand(ctx, opts.timeout, "pre-start command", command, argv, displayArgv, workDir, values, outputActualValues, preStartOutputDisplayValues)
+		if commandErr != nil {
+			return "", fmt.Errorf("pre-start command %d: %w", i+1, commandErr)
+		}
+		preStartTranscripts = append(preStartTranscripts, result)
+	}
 
 	_ = proxyListener.Close()
 	_ = adminListener.Close()
@@ -445,50 +467,13 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		if displayArgvErr != nil {
 			return "", fmt.Errorf("display command %d: %w", i+1, displayArgvErr)
 		}
-		commandResult := commandTranscript{displayed: shellJoin(displayArgv) + "\n"}
-		cmdCtx, cancel := context.WithTimeout(ctx, opts.timeout)
-		// Command argv comes from the executable examples explicitly selected by the extension author.
-		cmd := exec.CommandContext(cmdCtx, argv[0], argv[1:]...) // #nosec G204
-		cmd.Dir = workDir
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Env = append(os.Environ(), "PROXY_URL="+values["PROXY_URL"], "ADMIN_URL="+values["ADMIN_URL"], "UPSTREAM_ADDRESS="+values["UPSTREAM_ADDRESS"], "WORK_DIR="+workDir)
-		var stdoutBuf, stderrBuf bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &stdoutBuf, &stderrBuf
-		runErr := cmd.Run()
-		if cmd.Process != nil {
-			if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) && runErr == nil {
-				runErr = fmt.Errorf("clean up command process group: %w", killErr)
-			}
+		result, commandErr := executeExampleCommand(ctx, opts.timeout, "command", command, argv, displayArgv, workDir, values, outputActualValues, outputDisplayValues)
+		if commandErr != nil {
+			return "", fmt.Errorf("command %d: %w", i+1, commandErr)
 		}
-		cancel()
-		actualExit := exitCode(runErr)
-		if runErr != nil && actualExit < 0 {
-			return "", fmt.Errorf("command %q failed: %w; stderr: %s", shellJoin(command.Argv), runErr, stderrBuf.String())
-		}
-		if actualExit != command.ExpectedExit {
-			mismatch := fmt.Sprintf("command %q exited %d, expected %d", shellJoin(command.Argv), actualExit, command.ExpectedExit)
-			if runErr != nil {
-				return "", fmt.Errorf("%s: %w; stderr: %s", mismatch, runErr, stderrBuf.String())
-			}
-			return "", fmt.Errorf("%s; stderr: %s", mismatch, stderrBuf.String())
-		}
-		if stdoutBuf.Len() > 0 {
-			rendered, renderErr := renderOutput(stdoutBuf.String(), outputActualValues, outputDisplayValues, "stdout")
-			if renderErr != nil {
-				return "", fmt.Errorf("render command %d stdout: %w", i+1, renderErr)
-			}
-			commandResult.output = append(commandResult.output, rendered)
-		}
-		stderrText := filterCommandDiagnostics(argv, stderrBuf.String())
-		if stderrText != "" {
-			rendered, renderErr := renderOutput(stderrText, outputActualValues, outputDisplayValues, "stderr")
-			if renderErr != nil {
-				return "", fmt.Errorf("render command %d stderr: %w", i+1, renderErr)
-			}
-			commandResult.output = append(commandResult.output, rendered)
-		}
-		commandTranscripts = append(commandTranscripts, commandResult)
+		commandTranscripts = append(commandTranscripts, result)
 	}
+	appendTerminalOneTranscript(&transcript, preStartTranscripts, opts, transcriptArgs)
 	for index, command := range commandTranscripts {
 		var shellBlock strings.Builder
 		if index == 0 {
@@ -510,6 +495,138 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		return oldCode, nil
 	}
 	return generatedCode, nil
+}
+
+func executeExampleCommand(ctx context.Context, timeout time.Duration, phase string, command extensions.ExampleCommand, argv, displayArgv []string, workDir string, values, outputActualValues, outputDisplayValues map[string]string) (commandTranscript, error) {
+	displayed := renderCommandComment(command.Comment)
+	if command.Retry != nil {
+		displayed += fmt.Sprintf("# Repeat until HTTP %d, up to %d attempts.\n", command.Retry.HTTPStatus, command.Retry.MaxAttempts)
+	}
+	displayed += formatShellCommand(displayArgv) + "\n"
+	if command.Retry == nil {
+		result, err := executeExampleAttempt(ctx, timeout, phase, command, nil, argv, workDir, values, outputActualValues, outputDisplayValues)
+		result.displayed = displayed
+		return result, err
+	}
+	capture, err := retryCaptureMode(argv)
+	if err != nil {
+		return commandTranscript{}, fmt.Errorf("validate retry capture mode for %s %q: %w", phase, shellJoin(command.Argv), err)
+	}
+
+	groupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var lastStatus int
+	for attempt := 1; attempt <= command.Retry.MaxAttempts; attempt++ {
+		result, err := executeExampleAttempt(groupCtx, timeout, phase, command, &capture, argv, workDir, values, outputActualValues, outputDisplayValues)
+		if err != nil {
+			return commandTranscript{}, err
+		}
+		lastStatus, err = retryHTTPStatus(result.stdout, result.filteredStderr, capture)
+		if err != nil {
+			return commandTranscript{}, fmt.Errorf("parse HTTP status for %s %q attempt %d: %w", phase, shellJoin(command.Argv), attempt, err)
+		}
+		if lastStatus == command.Retry.HTTPStatus {
+			result.displayed = displayed
+			return result, nil
+		}
+	}
+	return commandTranscript{}, fmt.Errorf("%s %q exhausted after %d attempts; last HTTP status %d, wanted %d", phase, shellJoin(command.Argv), command.Retry.MaxAttempts, lastStatus, command.Retry.HTTPStatus)
+}
+
+func executeExampleAttempt(ctx context.Context, timeout time.Duration, phase string, command extensions.ExampleCommand, capture *retryCapture, argv []string, workDir string, values, outputActualValues, outputDisplayValues map[string]string) (commandTranscript, error) {
+	result := commandTranscript{}
+	if len(argv) == 0 {
+		return commandTranscript{}, errors.New("empty argv")
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Commands are authored in an extension manifest and intentionally run as subprocesses.
+	cmd := exec.CommandContext(cmdCtx, argv[0], argv[1:]...) // #nosec G204
+	cmd.Dir = workDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(os.Environ(), "PROXY_URL="+values["PROXY_URL"], "ADMIN_URL="+values["ADMIN_URL"], "UPSTREAM_ADDRESS="+values["UPSTREAM_ADDRESS"], "WORK_DIR="+workDir)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdoutBuf, &stderrBuf
+	runErr := cmd.Run()
+	if cmd.Process != nil {
+		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			return commandTranscript{}, fmt.Errorf("clean up %s process group: %w", phase, errors.Join(runErr, killErr))
+		}
+	}
+	if cmdCtx.Err() != nil {
+		return commandTranscript{}, fmt.Errorf("%s %q timed out or canceled: %w; stderr: %s", phase, shellJoin(command.Argv), cmdCtx.Err(), stderrBuf.String())
+	}
+	actualExit := exitCode(runErr)
+	if runErr != nil && actualExit < 0 {
+		return commandTranscript{}, fmt.Errorf("%s %q failed: %w; stderr: %s", phase, shellJoin(command.Argv), runErr, stderrBuf.String())
+	}
+	if actualExit != command.ExpectedExit {
+		mismatch := fmt.Sprintf("%s %q exited %d, expected %d", phase, shellJoin(command.Argv), actualExit, command.ExpectedExit)
+		if runErr != nil {
+			return commandTranscript{}, fmt.Errorf("%s: %w; stderr: %s", mismatch, runErr, stderrBuf.String())
+		}
+		return commandTranscript{}, fmt.Errorf("%s; stderr: %s", mismatch, stderrBuf.String())
+	}
+	if stdoutBuf.Len() > 0 {
+		rendered, renderErr := renderOutput(stdoutBuf.String(), outputActualValues, outputDisplayValues, "stdout")
+		if renderErr != nil {
+			return commandTranscript{}, fmt.Errorf("render %s stdout: %w", phase, renderErr)
+		}
+		result.output = append(result.output, rendered)
+	}
+	stderrText := filterCommandDiagnostics(argv, stderrBuf.String())
+	if capture != nil && capture.verbose {
+		stderrText = filterCurlTransportDiagnostics(stderrBuf.String())
+	}
+	result.stdout = stdoutBuf.String()
+	result.filteredStderr = stderrText
+	if stderrText != "" {
+		rendered, renderErr := renderOutput(stderrText, outputActualValues, outputDisplayValues, "stderr")
+		if renderErr != nil {
+			return commandTranscript{}, fmt.Errorf("render %s stderr: %w", phase, renderErr)
+		}
+		result.output = append(result.output, rendered)
+	}
+	return result, nil
+}
+
+func appendTerminalOneTranscript(transcript *strings.Builder, preStart []commandTranscript, opts *options, transcriptArgs []string) {
+	for index, command := range preStart {
+		var shellBlock strings.Builder
+		if index == 0 {
+			shellBlock.WriteString("# Terminal 1 (from the repository root)\n")
+		}
+		shellBlock.WriteString(command.displayed)
+		transcript.WriteString(renderFencedBlock("sh", shellBlock.String()))
+		for _, output := range command.output {
+			transcript.WriteString("\n\n" + output)
+		}
+		transcript.WriteString("\n\n")
+	}
+	var boeBlock strings.Builder
+	if len(preStart) == 0 {
+		boeBlock.WriteString("# Terminal 1 (from the repository root)\n")
+	} else {
+		boeBlock.WriteString("# Start BOE in Terminal 1 after the pre-start commands complete.\n")
+	}
+	if opts.envoyPath != "" {
+		boeBlock.WriteString("# Replace /path/to/envoy with a compatible Envoy binary.\n")
+	}
+	boeBlock.WriteString(formatShellCommand(append([]string{"boe"}, transcriptArgs...)) + "\n")
+	transcript.WriteString(renderFencedBlock("sh", boeBlock.String()))
 }
 
 type lockedBuffer struct {
@@ -949,6 +1066,36 @@ func shellJoin(argv []string) string {
 	return strings.Join(quoted, " ")
 }
 
+func formatShellCommand(argv []string) string {
+	var out strings.Builder
+	column := 0
+	for index, arg := range argv {
+		word := shellQuote(arg)
+		firstLine, _, _ := strings.Cut(word, "\n")
+		limit := 80
+		if index+1 < len(argv) {
+			// Reserve the space and backslash if the next argument needs a new line.
+			limit -= 2
+		}
+		if index > 0 {
+			if column+1+utf8.RuneCountInString(firstLine) > limit {
+				out.WriteString(" \\\n  ")
+				column = 2
+			} else {
+				out.WriteByte(' ')
+				column++
+			}
+		}
+		out.WriteString(word)
+		if newline := strings.LastIndexByte(word, '\n'); newline >= 0 {
+			column = utf8.RuneCountInString(word[newline+1:])
+		} else {
+			column += utf8.RuneCountInString(word)
+		}
+	}
+	return out.String()
+}
+
 func shellQuote(arg string) string {
 	if strings.Contains(arg, "${") {
 		matches := placeholderPattern.FindAllStringIndex(arg, -1)
@@ -984,6 +1131,45 @@ func stableJSON(config map[string]any) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func formatDisplayJSON(config map[string]any) (string, error) {
+	pretty := len(config) > 1
+	if len(config) == 1 {
+		for _, value := range config {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return "", err
+			}
+			pretty = len(encoded) > 0 && (encoded[0] == '{' || encoded[0] == '[')
+		}
+	}
+	if !pretty {
+		return stableJSON(config)
+	}
+	encoded, err := json.MarshalIndent(config, "  ", "  ")
+	if err != nil {
+		return "", err
+	}
+	return "\n  " + string(encoded), nil
+}
+
+func renderCommandComment(comment string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(comment, "\r\n", "\n"), "\r", "\n")
+	normalized = strings.TrimSuffix(normalized, "\n")
+	if normalized == "" {
+		return ""
+	}
+	var output strings.Builder
+	for _, line := range strings.Split(normalized, "\n") {
+		line = strings.TrimRight(line, " \t")
+		if line == "" {
+			output.WriteString("#\n")
+		} else {
+			output.WriteString("# " + line + "\n")
+		}
+	}
+	return output.String()
 }
 
 func portOf(address string) string {

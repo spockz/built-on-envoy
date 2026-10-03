@@ -46,7 +46,7 @@ func run() int {
 	flag.StringVar(&opts.envoyVersion, "envoy-version", "1.38.0", "Envoy version to use")
 	flag.StringVar(&opts.envoyPath, "envoy-path", "", "path to an Envoy binary")
 	flag.BoolVar(&opts.check, "check", false, "fail if generated examples differ without writing files")
-	flag.DurationVar(&opts.timeout, "timeout", 2*time.Minute, "timeout for each example command and Envoy startup")
+	flag.DurationVar(&opts.timeout, "timeout", 2*time.Minute, "total timeout for each example command (including retries) and Envoy startup")
 	flag.Parse()
 
 	if len(opts.extensions) == 0 {
