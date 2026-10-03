@@ -42,6 +42,8 @@ ROOT       := $(shell git rev-parse --show-toplevel)
 GO_TOOL    := go -C $(EXTENSION_PATH) tool -modfile=$(ROOT)/tools/go.mod
 RUST_VERSION = $(shell $(GO_TOOL) yq -e -p toml -oy '.toolchain.channel' "$(ROOT)/rust-toolchain.toml")
 
+EXAMPLES_ARGS ?=
+
 # Labels for this lua extension image.
 NAME             := $(shell $(GO_TOOL) yq '.name' manifest.yaml)
 VERSION          := $(shell $(GO_TOOL) yq '.version' manifest.yaml)
@@ -104,7 +106,7 @@ build-wasm:
 	@GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go -C $(EXTENSION_PATH) build -buildmode=c-shared -o ./out/plugin.wasm .
 
 .PHONY: check
-check: format lint test-coverage
+check: format lint test-coverage check-examples
 	# In addition to checking the extension code also generate the datasource files for the portal
 	# to ensure that the manifest.yaml is filled in "correctly".
 	$(MAKE) -C ../cli check
@@ -167,6 +169,18 @@ GO_TEST_ARGS ?=
 .PHONY: test-go
 test-go:
 	@go test -C $(EXTENSION_PATH) $(GO_TEST_ARGS) ./...
+
+.PHONY: test-examples
+test-examples:
+	@go -C "$(ROOT)" test ./cli/tools/gen-examples
+
+.PHONY: update-examples check-examples
+update-examples check-examples:
+	@if [ "$(TYPE)" = "composer" ]; then \
+		$(MAKE) -C "$(abspath $(EXTENSION_PATH))" "$@"; \
+	else \
+		go -C "$(ROOT)" run ./cli/tools/gen-examples -extension "$(abspath $(EXTENSION_PATH))" $(if $(filter check-examples,$@),-check,) $(EXAMPLES_ARGS); \
+	fi
 
 .PHONY: test-go-coverage
 test-go-coverage:

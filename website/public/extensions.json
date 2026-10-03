@@ -380,7 +380,33 @@
       {
         "title": "SQL Injection Protection",
         "description": "The following example demonstrates how to run the WAF plugin with recommended OWASP CRS rules and test SQL\ninjection protection by sending a malicious payload that should be blocked by the WAF.\n\nBy default WAF is configured in `DetectionOnly` mode, which means it will only log detected attacks without\nblocking them. To enable active blocking, this example sets `SecRuleEngine On` in the configuration. It also\nsets `SecResponseBodyAccess Off` to disable response body inspection as it's not needed for the example.\n",
-        "code": "# Start WAF with recommended OWASP CRS rules and enforcement enabled\nboe run --extension coraza-waf --config '\n  {\n    \"directives\": [\n      \"Include @coraza.conf\",\n      \"SecRuleEngine On\",\n      \"SecResponseBodyAccess Off\",\n      \"Include @crs-setup.conf\",\n      \"Include @owasp_crs/*.conf\"\n    ]\n  }'\n\n# Try sending a SQL injection payload and see the request rejected\ncurl -v http://localhost:10000/post -X POST --data \"1%27%20ORDER%20BY%203--%2B\"\n\n\u003c HTTP/1.1 403 Forbidden\n\u003c content-length: 22\n\u003c content-type: text/plain\n\u003c date: Thu, 12 Feb 2026 10:28:16 GMT\n\u003c server: envoy\n\u003c\n"
+        "code": "# Local upstream (started by this generator)\n# Run the following commands from the repository root.\n$ export PROXY_URL='http://127.0.0.1:10000'\n$ export ADMIN_URL='http://127.0.0.1:9901'\n$ export UPSTREAM_ADDRESS='127.0.0.1:10001'\n$ export WORK_DIR=\"$(mktemp -d)\"\n$ go run ./cli/tools/gen-examples -serve-upstream -upstream-address \"${UPSTREAM_ADDRESS}\" \u0026\n$ UPSTREAM_PID=$!\n\n# Start Envoy\n$ boe run --local extensions/composer/waf --listen-port \"${PROXY_URL##*:}\" --admin-port \"${ADMIN_URL##*:}\" --envoy-version 1.38.0 --cluster-insecure \"${UPSTREAM_ADDRESS}\" --test-upstream-cluster \"${UPSTREAM_ADDRESS}\" --config '{\"directives\":[\"Include @coraza.conf\",\"SecRuleEngine On\",\"SecResponseBodyAccess Off\",\"Include @crs-setup.conf\",\"Include @owasp_crs/*.conf\"]}' \u0026\n$ BOE_PID=$!\n$ for i in $(seq 1 300); do\n    [ \"$(curl --silent --max-time 1 \"${ADMIN_URL}/ready\" || true)\" = LIVE ] \u0026\u0026 break\n    sleep 0.1\n  done\n$ cd \"${WORK_DIR}\"\n\n$ curl --silent --show-error --include --max-time 10 --request POST --data '1%27%20ORDER%20BY%203--%2B' \"${PROXY_URL}\"/post\n# Output:\n# HTTP/1.1 403 Forbidden\n# date: Sat, 03 Oct 2026 07:40:18 GMT\n# server: envoy\n# content-length: 0\n#\n# Line endings: CRLF,CRLF,CRLF,CRLF,CRLF\n# End output\n\n$ cd - \u003e/dev/null\n$ kill \"${BOE_PID}\" \"${UPSTREAM_PID}\"\n$ rm -rf \"${WORK_DIR}\"\n",
+        "config": {
+          "directives": [
+            "Include @coraza.conf",
+            "SecRuleEngine On",
+            "SecResponseBodyAccess Off",
+            "Include @crs-setup.conf",
+            "Include @owasp_crs/*.conf"
+          ]
+        },
+        "commands": [
+          {
+            "argv": [
+              "curl",
+              "--silent",
+              "--show-error",
+              "--include",
+              "--max-time",
+              "10",
+              "--request",
+              "POST",
+              "--data",
+              "1%27%20ORDER%20BY%203--%2B",
+              "${PROXY_URL}/post"
+            ]
+          }
+        ]
       },
       {
         "title": "CRS plugin from local filesystem",
@@ -895,8 +921,42 @@
     "examples": [
       {
         "title": "Basic Authorization",
-        "description": "Run the OPA extension with a simple Rego policy that allows or denies\nrequests based on the request path. Create a policy file and reference\nit in the configuration.\n",
-        "code": "# Create a simple policy file\ncat \u003e /tmp/policy.rego \u003c\u003c 'EOF'\npackage envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"public\"\n}\nEOF\n\n# Run the extension\nboe run --extension opa --config '{\n  \"policies\": [{\"file\": \"/tmp/policy.rego\"}]\n}'\n\n# Test allowed request\ncurl http://localhost:10000/public/resource\n# =\u003e 200 OK (proxied to upstream)\n\n# Test denied request\ncurl http://localhost:10000/private/resource\n# =\u003e 403 Forbidden\n"
+        "description": "Run the OPA extension with a simple Rego policy that allows or denies\nrequests based on the request path. The inline policy allows requests\nto the local test upstream's status endpoints and denies other paths.\n",
+        "code": "# Local upstream (started by this generator)\n# Run the following commands from the repository root.\n$ export PROXY_URL='http://127.0.0.1:10000'\n$ export ADMIN_URL='http://127.0.0.1:9901'\n$ export UPSTREAM_ADDRESS='127.0.0.1:10001'\n$ export WORK_DIR=\"$(mktemp -d)\"\n$ go run ./cli/tools/gen-examples -serve-upstream -upstream-address \"${UPSTREAM_ADDRESS}\" \u0026\n$ UPSTREAM_PID=$!\n\n# Start Envoy\n$ boe run --local extensions/composer/opa --listen-port \"${PROXY_URL##*:}\" --admin-port \"${ADMIN_URL##*:}\" --envoy-version 1.38.0 --cluster-insecure \"${UPSTREAM_ADDRESS}\" --test-upstream-cluster \"${UPSTREAM_ADDRESS}\" --config '{\"policies\":[{\"inline\":\"package envoy.authz\\n\\ndefault allow := false\\n\\nallow if {\\n  input.parsed_path[0] == \\\"status\\\"\\n}\\n\"}]}' \u0026\n$ BOE_PID=$!\n$ for i in $(seq 1 300); do\n    [ \"$(curl --silent --max-time 1 \"${ADMIN_URL}/ready\" || true)\" = LIVE ] \u0026\u0026 break\n    sleep 0.1\n  done\n$ cd \"${WORK_DIR}\"\n\n$ curl --silent --show-error --include --max-time 10 \"${PROXY_URL}\"/status/200\n# Output:\n# HTTP/1.1 200 OK\n# access-control-allow-credentials: true\n# access-control-allow-origin: *\n# content-type: text/plain; charset=utf-8\n# date: Sat, 03 Oct 2026 07:40:16 GMT\n# content-length: 0\n# x-envoy-upstream-service-time: 0\n# server: envoy\n#\n# Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF\n# End output\n\n$ curl --silent --show-error --include --max-time 10 \"${PROXY_URL}\"/private/resource\n# Output:\n# HTTP/1.1 403 Forbidden\n# content-length: 9\n# content-type: text/plain\n# date: Sat, 03 Oct 2026 07:40:16 GMT\n# server: envoy\n#\n# Forbidden\n# Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF\n# No trailing newline\n# End output\n\n$ cd - \u003e/dev/null\n$ kill \"${BOE_PID}\" \"${UPSTREAM_PID}\"\n$ rm -rf \"${WORK_DIR}\"\n",
+        "config": {
+          "policies": [
+            {
+              "inline": "package envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"status\"\n}\n"
+            }
+          ]
+        },
+        "commands": [
+          {
+            "argv": [
+              "curl",
+              "--silent",
+              "--show-error",
+              "--include",
+              "--max-time",
+              "10",
+              "${PROXY_URL}/status/200"
+            ]
+          },
+          {
+            "argv": [
+              "curl",
+              "--silent",
+              "--show-error",
+              "--include",
+              "--max-time",
+              "10",
+              "${PROXY_URL}/private/resource"
+            ]
+          }
+        ],
+        "volatileHeaders": [
+          "x-envoy-upstream-service-time"
+        ]
       },
       {
         "title": "Custom Deny Response",

@@ -133,9 +133,18 @@
         "type": "object",
         "required": [
           "title",
-          "description",
-          "code"
+          "description"
         ],
+        "anyOf": [
+          { "required": ["code"] },
+          { "required": ["config", "commands"] }
+        ],
+        "dependentRequired": {
+          "config": ["commands"],
+          "commands": ["config"],
+          "comparison": ["config", "commands"],
+          "volatileHeaders": ["config", "commands"]
+        },
         "additionalProperties": false,
         "properties": {
           "title": {
@@ -150,8 +159,65 @@
           },
           "code": {
             "type": "string",
-            "description": "Code snippet showing usage.",
+            "description": "Code snippet showing usage. Generated from config and commands for executable examples.",
             "minLength": 1
+          },
+          "config": {
+            "type": "object",
+            "description": "Extension configuration for an executable example. Serialized as JSON for boe run; an empty object is allowed."
+          },
+          "commands": {
+            "type": "array",
+            "description": "Commands executed sequentially against the running extension to generate code.",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["argv"],
+              "additionalProperties": false,
+              "properties": {
+                "argv": {
+                  "type": "array",
+                  "description": "Executable and arguments, without shell evaluation. Supports PROXY_URL, ADMIN_URL, UPSTREAM_ADDRESS, and WORK_DIR placeholders in ${NAME} form.",
+                  "minItems": 1,
+                  "prefixItems": [{ "type": "string", "minLength": 1 }],
+                  "items": { "type": "string" }
+                },
+                "expectedExit": {
+                  "type": "integer",
+                  "description": "Expected command exit code. Defaults to zero; HTTP denial responses do not normally cause curl to fail.",
+                  "minimum": 0,
+                  "maximum": 255
+                }
+              }
+            }
+          },
+          "volatileHeaders": {
+            "type": "array",
+            "description": "Case-insensitive response header names whose values vary between runs. Date and duration formats are inferred; only values with the same recognized type and format compare equal. Unrecognized values compare exactly. HTTP Date headers are handled automatically as dates.",
+            "items": {
+              "type": "string",
+              "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+            }
+          },
+          "comparison": {
+            "type": "array",
+            "description": "Scoped comparison rules for date and duration values in captured output, beyond HTTP headers. Invalid values and format changes remain visible.",
+            "items": {
+              "type": "object",
+              "required": ["type", "pattern"],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["date", "duration"]
+                },
+                "pattern": {
+                  "type": "string",
+                  "description": "Go regular expression with exactly one named value capture, (?P<value>...). Only the captured value is compared by format.",
+                  "minLength": 1
+                }
+              }
+            }
           }
         }
       }
