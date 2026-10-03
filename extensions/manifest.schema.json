@@ -142,6 +142,7 @@
         "dependentRequired": {
           "config": ["commands"],
           "commands": ["config"],
+          "preStart": ["config", "commands"],
           "comparison": ["config", "commands"],
           "volatileHeaders": ["config", "commands"]
         },
@@ -170,26 +171,13 @@
             "type": "array",
             "description": "Commands executed sequentially against the running extension to generate code.",
             "minItems": 1,
-            "items": {
-              "type": "object",
-              "required": ["argv"],
-              "additionalProperties": false,
-              "properties": {
-                "argv": {
-                  "type": "array",
-                  "description": "Executable and arguments, without shell evaluation. Supports PROXY_URL, ADMIN_URL, UPSTREAM_ADDRESS, and WORK_DIR placeholders in ${NAME} form.",
-                  "minItems": 1,
-                  "prefixItems": [{ "type": "string", "minLength": 1 }],
-                  "items": { "type": "string" }
-                },
-                "expectedExit": {
-                  "type": "integer",
-                  "description": "Expected command exit code. Defaults to zero; HTTP denial responses do not normally cause curl to fail.",
-                  "minimum": 0,
-                  "maximum": 255
-                }
-              }
-            }
+            "items": { "$ref": "#/$defs/exampleCommand" }
+          },
+          "preStart": {
+            "type": "array",
+            "description": "Commands executed sequentially before starting the extension.",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/exampleCommand" }
           },
           "volatileHeaders": {
             "type": "array",
@@ -382,6 +370,53 @@
                 }
               }
             ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "exampleCommand": {
+      "type": "object",
+      "required": ["argv"],
+      "additionalProperties": false,
+      "properties": {
+        "comment": {
+          "type": "string",
+          "description": "Comment explaining the command.",
+          "minLength": 1
+        },
+        "argv": {
+          "type": "array",
+          "description": "Executable and arguments, without shell evaluation. Supports PROXY_URL, ADMIN_URL, UPSTREAM_ADDRESS, and WORK_DIR placeholders in `${NAME}` form.",
+          "minItems": 1,
+          "prefixItems": [{ "type": "string", "minLength": 1 }],
+          "items": { "type": "string" }
+        },
+        "expectedExit": {
+          "type": "integer",
+          "description": "Expected command exit code. Defaults to zero; HTTP denial responses do not normally cause curl to fail.",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "retry": {
+          "type": "object",
+          "description": "Repeat a single curl request until it returns the selected HTTP status, within a bounded number of attempts.",
+          "required": ["httpStatus", "maxAttempts"],
+          "additionalProperties": false,
+          "properties": {
+            "httpStatus": {
+              "type": "integer",
+              "description": "Final HTTP response status to capture.",
+              "minimum": 200,
+              "maximum": 599
+            },
+            "maxAttempts": {
+              "type": "integer",
+              "description": "Maximum number of attempts, including the first request.",
+              "minimum": 1,
+              "maximum": 10000
+            }
           }
         }
       }

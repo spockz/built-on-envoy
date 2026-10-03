@@ -21,8 +21,29 @@ The aggregate `check` target depends on the separate `check-examples` target.
   from `{}` and are invalid for executable examples. Existing code-only examples remain valid.
 - Start the selected extension through the current checkout's local BOE execution path, wait
   for Envoy readiness, and run commands against it. Never substitute expected output for execution.
+- Optional `preStart` commands prepare inputs before BOE starts. Stage fixtures first, then run
+  these commands in order in the same isolated work directory used by later commands. Share command
+  execution, timeout, capture, and `expectedExit` handling with `commands`; a pre-start failure
+  prevents BOE startup and all manifest writes. Processes must finish before the next step.
+- Timeouts and cancellation always fail, regardless of `expectedExit`. Kill the command process
+  group on cancellation and bound output-pipe waiting so shell children cannot outlive a timed-out
+  command. Cleanup failures must remain errors even when a nonzero exit was expected.
+- Render pre-start commands and captured output in Terminal 1 before its BOE invocation. Its
+  `${WORK_DIR}` display path is relative to the repository root, matching configuration paths.
+  Terminal 2 commands use `.` after their optional fixture-directory `cd`. Generated files must
+  remain available to BOE and later commands for the entire example run.
 - Capture commands and their stdout/stderr in a reproducible transcript. Authors do not maintain
   a second copy of command text or expected responses.
+- An optional `preStart[].comment` or `commands[].comment` is display text emitted as `#` lines
+  above that command. It is not executed or placeholder-expanded, and its text is compared literally
+  on regeneration.
+- Keep simple configuration readable: an empty object or one top-level scalar setting is rendered
+  as compact JSON. Multiple settings or any nested object or array use pretty-printed, indented
+  JSON in the displayed BOE command.
+- Wrap displayed commands at argument boundaries to fit 80 characters, including continuation
+  markers and indentation. Use backslash-newline continuations outside quotes; preserve indivisible
+  arguments and embedded JSON lines even when they exceed the limit. Never interpret `&&` or `||`
+  inside an argument as shell operators or change argument bytes to shorten a line.
 - Display local commands using BOE's default setup: listener `http://localhost:10000`, admin
   `http://127.0.0.1:9901`, and the default `httpbin.org` upstream. Expand source placeholders into
   literal default URLs and configuration values. Do not expose allocated port variables,
@@ -35,6 +56,45 @@ The aggregate `check` target depends on the separate `check-examples` target.
   reports meaningful differences, and exits unsuccessfully on drift without writing manifests.
 - Suppress changes to declared date or duration values only when their format is unchanged.
   Keep the reviewed transcript when those are the only differences.
+
+## Current execution boundaries
+
+One example runs one local extension configuration in one BOE instance, with its default upstream.
+`preStart` covers downloads, file creation, and local builds; explicit `sh -c` commands can express
+shell variables, pipelines, and heredocs. It does not extend the BOE invocation or supervise services.
+Existing examples expose these remaining gaps:
+
+- [DNS lookup](../../../extensions/dns-gateway/manifests/lookup/manifest.yaml) starts resolver and
+  lookup together with separate configurations. [Cluster router](../../../extensions/composer/cluster-router/manifest.yaml)
+  uses multiple Envoy peers. These need multi-extension configuration and service orchestration.
+- [Bedrock](../../../extensions/composer/bedrock-guardrails/manifest.yaml),
+  [token exchange](../../../extensions/composer/token-exchange/manifest.yaml), and
+  [OpenFGA](../../../extensions/composer/openfga/manifest.yaml) pass extra clusters to BOE. Decoder
+  examples select an upstream host, and routing examples depend on custom routes. These need a
+  way to configure the primary BOE/bootstrap options.
+- Cloud/API examples contain credential placeholders in configuration. The current placeholder
+  set does not support environment-backed configuration or transcript redaction. Credentials and
+  reachable external APIs are also prerequisites for execution.
+- [SAML](../../../extensions/composer/saml/manifest.yaml) and token exchange start Docker services.
+  Pre-start steps can start containers, but there is no cleanup phase for stopping them after BOE
+  or on failure. Do not migrate these examples until teardown can be guaranteed. Background child
+  processes do not survive command process-group cleanup.
+- SAML examples require browser login and manual inspection, which this command runner cannot
+  replay. DNS interception additionally requires privileged host networking setup.
+- Commands may declare a bounded HTTP-status retry to make a transient response target observable
+  during capture. This retries a command only while it exits as expected and returns a valid HTTP
+  response with another status; command failures, timeouts, cancellation, and unparseable output
+  fail immediately. Only the matching attempt is captured, and exhaustion fails the example before
+  any manifest is written. The displayed comment explains the capture retry, while the copied
+  command itself runs once. Retries do not make probabilistic behavior repeatable: the
+  [dynamic fault injection](../../../extensions/composer/dynamic-fault-injection/manifest.yaml)
+  example captures each randomly sampled status in a separate command. This checks that both cases
+  occur within the bound, not their probability. Status changes must never be normalized away.
+  Its verbose timing headers use milliseconds with three decimal places. The added-delay header
+  appears only when the upstream needs more delay; that presence change remains visible as drift.
+- Decoder examples illustrate dynamic metadata in comments. Curl cannot observe those values,
+  and current decoder logs do not expose them. A downstream observer filter or configured metadata
+  access log is needed to generate that output; successful BOE logs are not captured by this tool.
 
 ## Transcript format
 
@@ -110,6 +170,21 @@ Comparison invariants:
 - Argument boundaries are preserved and commands run without implicit shell evaluation.
   `expectedExit` defaults to zero. A launch failure, signal, timeout, or unexpected exit fails
   generation; an HTTP denial succeeds when the command itself returns its expected exit code.
+- An optional `retry` on `commands[]` or `preStart[]` contains `httpStatus` (200–599) and
+  `maxAttempts` (1–10000). It repeats the same argv and working directory within the command's
+  total timeout. Only a valid HTTP status mismatch is retried; an unexpected exit, timeout,
+  cancellation, or response that cannot be parsed fails immediately. Only the selected attempt's
+  output is captured. Exhaustion fails the run atomically. Generated comments describe this
+  capture-only retry; copied commands do not contain a retry loop.
+- Retry commands invoke `curl` directly with `--disable` (or `-q`) first so user curl configuration
+  cannot change the capture. Select a declared capture mode: `--verbose` parses
+  only its framed stderr exchange, `--include` parses only the initial stdout response, or
+  `--write-out` starts with `HTTP/%{http_version} %{http_code}` and a newline while `--output /dev/null`
+  diverts the body. Header-style write-out output must terminate with a blank line. Mixed capture
+  modes must agree. HTTP-shaped body text cannot select a status. Retries require one HTTP(S) URL;
+  redirects, curl-owned retries, multiple transfers, config files, and unsupported curl options fail
+  before execution. URL globbing requires `--globoff`; HTTPS include capture requires
+  `--suppress-connect-headers` to exclude proxy CONNECT headers.
 - Only `${PROXY_URL}`, `${ADMIN_URL}`, `${UPSTREAM_ADDRESS}`, and `${WORK_DIR}` are expanded in
   authored configuration and arguments. Unknown placeholders fail explicitly. Execution uses
   allocated listener/admin addresses privately; display uses the literal defaults. The upstream

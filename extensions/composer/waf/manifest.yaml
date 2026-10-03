@@ -103,7 +103,36 @@ longDescription: |
   |--------|------|------|-------------|
   | `waf_tx_total` | - | Counter | Total amount of transactions processed by the WAF. |
   | `waf_tx_blocked` | `authority`, `phase`, `rule_id` | Counter | Total amount of transactions blocked by the WAF. The `rule_id` will not be set if the request is not blocked by a concrete rule but by a WAF internal error. |
-  | `waf_tx_duration` | - | Histogram | Duration of WAF processing the transaction, in milliseconds. |
+  | `waf_tx_duration` | - | Histogram | Duration of WAF processing the transaction, in microseconds. |
+
+  ### Histogram resolution
+
+  Envoy records dynamic-module histograms without a unit, so its default bucket
+  bounds apply verbatim to the microsecond values of `waf_tx_duration`. Two
+  consequences:
+
+  - Typical CRS evaluation lands in the ~0.5–10 ms range, which the default
+    bounds cover with only five buckets (`500, 1000, 2500, 5000, 10000`).
+  - The largest finite bound is 3,600,000 µs (3.6 s). `_sum`/`_count` and the
+    admin-interface quantiles stay correct above it, but PromQL's
+    `histogram_quantile()` clamps any quantile falling past the last finite
+    bound to that bound.
+
+  Both can be tuned in the Envoy bootstrap configuration, without touching the
+  extension. Two details about the matcher, both of which fail silently when
+  missed: it sees the stat name before tag extraction, i.e. with the
+  `dynamicmodulescustom.` prefix, and `safe_regex` is matched against the whole
+  name — hence the leading `.*` below.
+
+  ```yaml
+  stats_config:
+    histogram_bucket_settings:
+      - match:
+          safe_regex:
+            regex: ".*waf_tx_duration"
+        # Sharper resolution across typical CRS latencies; ceiling at 10 s.
+        buckets: [100, 250, 500, 750, 1000, 1500, 2500, 5000, 10000, 25000, 100000, 1000000, 10000000]
+  ```
 
   ## Per Route Configuration
 
@@ -138,11 +167,14 @@ examples:
         - Include @crs-setup.conf
         - Include @owasp_crs/*.conf
     commands:
-      - argv:
+      - comment: Try sending a SQL injection payload and see the request rejected.
+        argv:
           - curl
           - --silent
           - --show-error
-          - --include
+          - --verbose
+          - --user-agent
+          - boe-example
           - --max-time
           - "10"
           - --request
@@ -151,53 +183,150 @@ examples:
           - "1%27%20ORDER%20BY%203--%2B"
           - "${PROXY_URL}/post"
     code: |
+      ```sh
       # Terminal 1 (from the repository root)
-      $ boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '{"directives":["Include @coraza.conf","SecRuleEngine On","SecResponseBodyAccess Off","Include @crs-setup.conf","Include @owasp_crs/*.conf"]}'
-
-      # Terminal 2 (after Envoy is ready, from the repository root)
-      $ curl --silent --show-error --include --max-time 10 --request POST --data '1%27%20ORDER%20BY%203--%2B' http://localhost:10000/post
-      # Output:
-      # HTTP/1.1 403 Forbidden
-      # date: Sat, 03 Oct 2026 09:44:12 GMT
-      # server: envoy
-      # content-length: 0
-      #
-      # Line endings: CRLF,CRLF,CRLF,CRLF,CRLF
-      # End output
-
-  - title: CRS plugin from local filesystem
-    description: |
-      The following example demonstrates how to load a CRS plugin from the local filesystem and run the WAF plugin
-      with recommended OWASP CRS rules.
-
-      It first downloads the WordPress rule exclusions plugin to a local file, enables blocking with
-      `SecRuleEngine On`, and includes the plugin using `Include /tmp/wordpress-plugin.conf`. The same SQL injection
-      payload that would normally be blocked is no longer blocked because the plugin excludes this specific attack
-      vector.
-    code: |
-      # Retrieve the file
-      curl https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/refs/heads/master/plugins/wordpress-rule-exclusions-before.conf -o /tmp/wordpress-plugin-before.conf
-      
-      # Start WAF with recommended OWASP CRS rules, enforcement enabled, and loading the plugin file
-      boe run --extension coraza-waf --config '
+      boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '
         {
           "directives": [
             "Include @coraza.conf",
             "SecRuleEngine On",
             "SecResponseBodyAccess Off",
             "Include @crs-setup.conf",
-            "Include /tmp/wordpress-plugin-before.conf",
             "Include @owasp_crs/*.conf"
           ]
         }'
+      ```
 
-      # Try sending a SQL injection payload and see the request rejected
-      curl -v "http://localhost:10000/wp-json/wp/v2/posts/1" -X POST -H "Content-Type: application/json" --data '{"content": "SELECT * FROM users WHERE id=1"}'
+      ```sh
+      # Terminal 2 (after Envoy is ready, from the repository root)
+      # Try sending a SQL injection payload and see the request rejected.
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
+        --request POST --data '1%27%20ORDER%20BY%203--%2B' http://localhost:10000/post
+      ```
 
-      # The request is no longer blocked by the WAF as the rules in the plugin file are excluding the specific attack vector from being detected
+      ```text
+      > POST /post HTTP/1.1
+      > Host: localhost:10000
+      > User-Agent: boe-example
+      > Accept: */*
+      > Content-Length: 26
+      > Content-Type: application/x-www-form-urlencoded
+      >
+      < HTTP/1.1 403 Forbidden
+      < date: Sat, 03 Oct 2026 11:31:45 GMT
+      < server: envoy
+      < content-length: 0
+      <
+      ```
+      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NiwidGV4dCI6IiAifSx7ImxpbmUiOjExLCJ0ZXh0IjoiICJ9XQ== -->
+  - title: CRS plugin from local filesystem
+    description: |
+      The following example demonstrates how to load a CRS plugin from the local filesystem and run the WAF plugin
+      with recommended OWASP CRS rules.
+
+      It first downloads the WordPress rule exclusions plugin to a local file, enables blocking with
+      `SecRuleEngine On`, and includes the downloaded plugin file. The same SQL injection
+      payload that would normally be blocked is no longer blocked because the plugin excludes this specific attack
+      vector.
+    preStart:
+      - comment: Download the WordPress rule exclusions plugin before starting WAF.
+        argv:
+          - curl
+          - --fail
+          - --silent
+          - --show-error
+          - --location
+          - --max-time
+          - "30"
+          - https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/refs/heads/master/plugins/wordpress-rule-exclusions-before.conf
+          - --output
+          - "${WORK_DIR}/wordpress-plugin-before.conf"
+    config:
+      directives:
+        - Include @coraza.conf
+        - SecRuleEngine On
+        - SecResponseBodyAccess Off
+        - Include @crs-setup.conf
+        - Include ${WORK_DIR}/wordpress-plugin-before.conf
+        - Include @owasp_crs/*.conf
+    commands:
+      - comment: Send a WordPress request allowed by the plugin's rule exclusions.
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --verbose
+          - --user-agent
+          - boe-example
+          - --max-time
+          - "10"
+          - --request
+          - POST
+          - --header
+          - "Content-Type: application/json"
+          - --data
+          - '{"content": "SELECT * FROM users WHERE id=1"}'
+          - "${PROXY_URL}/wp-json/wp/v2/posts/1"
+    volatileHeaders:
+      - x-envoy-upstream-service-time
+    code: |
+      ```sh
+      # Terminal 1 (from the repository root)
+      # Download the WordPress rule exclusions plugin before starting WAF.
+      curl --fail --silent --show-error --location --max-time 30 \
+        https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/refs/heads/master/plugins/wordpress-rule-exclusions-before.conf \
+        --output ./wordpress-plugin-before.conf
+      ```
+
+      ```sh
+      # Start BOE in Terminal 1 after the pre-start commands complete.
+      boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '
+        {
+          "directives": [
+            "Include @coraza.conf",
+            "SecRuleEngine On",
+            "SecResponseBodyAccess Off",
+            "Include @crs-setup.conf",
+            "Include ./wordpress-plugin-before.conf",
+            "Include @owasp_crs/*.conf"
+          ]
+        }'
+      ```
+
+      ```sh
+      # Terminal 2 (after Envoy is ready, from the repository root)
+      # Send a WordPress request allowed by the plugin's rule exclusions.
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
+        --request POST --header 'Content-Type: application/json' --data \
+        '{"content": "SELECT * FROM users WHERE id=1"}' \
+        http://localhost:10000/wp-json/wp/v2/posts/1
+      ```
+
+      ```text
+      <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+      <title>404 Not Found</title>
+      <h1>Not Found</h1>
+      <p>The requested URL was not found on the server.  If you entered the URL manually please check your spelling and try again.</p>
+      ```
+      <!-- stdout; Line endings: LF,LF,LF,LF -->
+
+
+      ```text
+      > POST /wp-json/wp/v2/posts/1 HTTP/1.1
+      > Host: localhost:10000
+      > User-Agent: boe-example
+      > Accept: */*
+      > Content-Type: application/json
+      > Content-Length: 45
+      >
       < HTTP/1.1 404 Not Found
-      < date: Wed, 01 Apr 2026 13:10:33 GMT
+      < date: Sat, 03 Oct 2026 11:57:33 GMT
       < content-type: text/html
       < content-length: 233
       < server: envoy
-      ...
+      < access-control-allow-origin: *
+      < access-control-allow-credentials: true
+      < x-envoy-upstream-service-time: 465
+      <
+      ```
+      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NiwidGV4dCI6IiAifSx7ImxpbmUiOjE1LCJ0ZXh0IjoiICJ9XQ== -->

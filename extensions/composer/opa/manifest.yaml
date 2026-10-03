@@ -129,19 +129,30 @@ examples:
               input.parsed_path[0] == "status"
             }
     commands:
-      - argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/status/200"]
-      - argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/private/resource"]
+      - comment: Request a status endpoint allowed by the policy.
+        argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/status/200"]
+      - comment: Request a private path and see it denied.
+        argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/private/resource"]
     volatileHeaders:
       - x-envoy-upstream-service-time
     code: |
       ```sh
       # Terminal 1 (from the repository root)
-      boe run --local extensions/composer/opa --envoy-version 1.38.0 --config '{"policies":[{"inline":"package envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"status\"\n}\n"}]}'
+      boe run --local extensions/composer/opa --envoy-version 1.38.0 --config '
+        {
+          "policies": [
+            {
+              "inline": "package envoy.authz\n\ndefault allow := false\n\nallow if {\n  input.parsed_path[0] == \"status\"\n}\n"
+            }
+          ]
+        }'
       ```
 
       ```sh
       # Terminal 2 (after Envoy is ready, from the repository root)
-      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 http://localhost:10000/status/200
+      # Request a status endpoint allowed by the policy.
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
+        http://localhost:10000/status/200
       ```
 
       ```text
@@ -151,20 +162,22 @@ examples:
       > Accept: */*
       >
       < HTTP/1.1 200 OK
-      < date: Sat, 03 Oct 2026 10:05:41 GMT
+      < date: Sat, 03 Oct 2026 11:31:44 GMT
       < content-type: text/html; charset=utf-8
       < content-length: 0
       < server: envoy
       < access-control-allow-origin: *
       < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 389
+      < x-envoy-upstream-service-time: 387
       <
       ```
       <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjEzLCJ0ZXh0IjoiICJ9XQ== -->
 
 
       ```sh
-      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 http://localhost:10000/private/resource
+      # Request a private path and see it denied.
+      curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
+        http://localhost:10000/private/resource
       ```
 
       ```text
@@ -182,7 +195,7 @@ examples:
       < HTTP/1.1 403 Forbidden
       < content-length: 9
       < content-type: text/plain
-      < date: Sat, 03 Oct 2026 10:05:41 GMT
+      < date: Sat, 03 Oct 2026 11:31:44 GMT
       < server: envoy
       <
       ```
