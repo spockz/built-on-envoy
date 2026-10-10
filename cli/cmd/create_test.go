@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -359,6 +360,21 @@ func TestCreateRust_Run(t *testing.T) {
 	assert.Contains(t, string(cargo), `name = "`+name+`"`)
 	// Verify lib name conversion (hyphens to underscores)
 	assert.Contains(t, string(cargo), `name = "my_rust_extension"`)
+
+	// #nosec G304
+	dockerfile, err := os.ReadFile(filepath.Join(repoPath, "Dockerfile"))
+	require.NoError(t, err)
+	// #nosec G304
+	toolchainFile, err := os.ReadFile(filepath.Join("..", "..", "rust-toolchain.toml"))
+	require.NoError(t, err)
+	var toolchain struct {
+		Toolchain struct {
+			Channel string `toml:"channel"`
+		} `toml:"toolchain"`
+	}
+	require.NoError(t, toml.Unmarshal(toolchainFile, &toolchain))
+	require.NotEmpty(t, toolchain.Toolchain.Channel)
+	assert.Contains(t, string(dockerfile), `--default-toolchain "`+toolchain.Toolchain.Channel+`"`)
 
 	// verify src/lib.rs content
 	// #nosec G304

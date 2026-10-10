@@ -17,6 +17,9 @@ import (
 	"slices"
 	"text/template"
 
+	"github.com/pelletier/go-toml/v2"
+
+	builtonenvoy "github.com/tetratelabs/built-on-envoy"
 	"github.com/tetratelabs/built-on-envoy/cli/internal"
 	"github.com/tetratelabs/built-on-envoy/cli/internal/extensions"
 	"github.com/tetratelabs/built-on-envoy/cli/internal/xdg"
@@ -244,11 +247,23 @@ func createWasmExtension(logger *slog.Logger, dirs *xdg.Directories, path, name 
 
 func createRustExtension(logger *slog.Logger, path, name, filterType string) error {
 	repoPath := filepath.Join(path, name)
+	var toolchain struct {
+		Toolchain struct {
+			Channel string `toml:"channel"`
+		} `toml:"toolchain"`
+	}
+	if err := toml.Unmarshal(builtonenvoy.RustToolchain, &toolchain); err != nil {
+		return fmt.Errorf("failed to parse Rust toolchain: %w", err)
+	}
+	if toolchain.Toolchain.Channel == "" {
+		return fmt.Errorf("rust toolchain channel is missing")
+	}
 
 	data := map[string]string{
 		"Name": name,
 		// Convert name to lib_name (replace hyphens with underscores for Rust crate name)
-		"LibName": extensions.RustLibNameFromName(name),
+		"LibName":     extensions.RustLibNameFromName(name),
+		"RustVersion": toolchain.Toolchain.Channel,
 	}
 
 	libTemplate := fmt.Sprintf("templates/create/rust/lib_%s.rs.tmpl", filterType)
