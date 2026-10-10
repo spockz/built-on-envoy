@@ -8,6 +8,7 @@ package cmd
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -245,6 +246,11 @@ func createWasmExtension(logger *slog.Logger, dirs *xdg.Directories, path, name 
 	return nil
 }
 
+var (
+	errFailedToParseRustToolchain  = errors.New("failed to parse Rust toolchain")
+	errMissingRustToolchainChannel = errors.New("rust toolchain channel is missing")
+)
+
 func createRustExtension(logger *slog.Logger, path, name, filterType string) error {
 	repoPath := filepath.Join(path, name)
 	var toolchain struct {
@@ -253,10 +259,10 @@ func createRustExtension(logger *slog.Logger, path, name, filterType string) err
 		} `toml:"toolchain"`
 	}
 	if err := toml.Unmarshal(builtonenvoy.RustToolchain, &toolchain); err != nil {
-		return fmt.Errorf("failed to parse Rust toolchain: %w", err)
+		return fmt.Errorf("%w: %w", errFailedToParseRustToolchain, err)
 	}
 	if toolchain.Toolchain.Channel == "" {
-		return fmt.Errorf("rust toolchain channel is missing")
+		return errMissingRustToolchainChannel
 	}
 
 	data := map[string]string{
