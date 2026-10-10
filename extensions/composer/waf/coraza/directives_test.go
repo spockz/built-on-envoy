@@ -188,7 +188,7 @@ func TestCombinedDirectivesFS_EmbeddedDirectivesInNestedInclude(t *testing.T) {
 		conf := filepath.Join(dir, "my.conf")
 		require.NoError(t, os.WriteFile(conf, []byte("Include @coraza.conf\n"), 0o600))
 
-		waf, err := NewWAFFromDirectives("Include "+conf, zap.NewNop())
+		waf, err := GetOrCreateSharedWAF("Include "+conf, zap.NewNop())
 		require.NoError(t, err)
 		require.True(t, waf.NewTransaction().IsResponseBodyAccessible())
 	})
