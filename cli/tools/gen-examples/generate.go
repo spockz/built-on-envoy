@@ -341,7 +341,8 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	}
 	relExtension = filepath.ToSlash(relExtension)
 	fixturePath := "."
-	if hasFixtures(extensionPath) {
+	repositoryFixtures := hasFixtures(extensionPath)
+	if repositoryFixtures {
 		fixturePath = filepath.ToSlash(filepath.Join(relExtension, "examples"))
 	}
 	displayConfigValues := map[string]string{
@@ -407,7 +408,7 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	if example.Config != nil {
 		args = append(args, "--config", configJSON)
 	}
-	transcriptArgs := []string{"run", "--local", relExtension}
+	transcriptArgs := []string{"run", "--extension", manifest.Name}
 	if opts.envoyPath != "" {
 		transcriptArgs = append(transcriptArgs, "--envoy-path", "/path/to/envoy")
 	} else {
@@ -418,9 +419,11 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	}
 	var transcript strings.Builder
 	var terminalTwoPrefix strings.Builder
-	terminalTwoPrefix.WriteString("# Terminal 2 (after Envoy is ready, from the repository root)\n")
-	if hasFixtures(extensionPath) {
+	if repositoryFixtures {
+		terminalTwoPrefix.WriteString("# Terminal 2 (after Envoy is ready, from the repository root)\n")
 		terminalTwoPrefix.WriteString(formatShellCommand([]string{"cd", fixturePath}) + "\n")
+	} else {
+		terminalTwoPrefix.WriteString("# Terminal 2 (after Envoy is ready)\n")
 	}
 	commandTranscripts := make([]commandTranscript, 0, len(example.Commands))
 	preStartTranscripts := make([]commandTranscript, 0, len(example.PreStart))
@@ -473,7 +476,7 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		}
 		commandTranscripts = append(commandTranscripts, result)
 	}
-	appendTerminalOneTranscript(&transcript, preStartTranscripts, opts, transcriptArgs)
+	appendTerminalOneTranscript(&transcript, preStartTranscripts, opts, transcriptArgs, repositoryFixtures)
 	for index, command := range commandTranscripts {
 		var shellBlock strings.Builder
 		if index == 0 {
@@ -603,11 +606,15 @@ func executeExampleAttempt(ctx context.Context, timeout time.Duration, phase str
 	return result, nil
 }
 
-func appendTerminalOneTranscript(transcript *strings.Builder, preStart []commandTranscript, opts *options, transcriptArgs []string) {
+func appendTerminalOneTranscript(transcript *strings.Builder, preStart []commandTranscript, opts *options, transcriptArgs []string, repositoryFixtures bool) {
+	heading := "# Terminal 1\n"
+	if repositoryFixtures {
+		heading = "# Terminal 1 (from the repository root)\n"
+	}
 	for index, command := range preStart {
 		var shellBlock strings.Builder
 		if index == 0 {
-			shellBlock.WriteString("# Terminal 1 (from the repository root)\n")
+			shellBlock.WriteString(heading)
 		}
 		shellBlock.WriteString(command.displayed)
 		transcript.WriteString(renderFencedBlock("sh", shellBlock.String()))
@@ -618,7 +625,7 @@ func appendTerminalOneTranscript(transcript *strings.Builder, preStart []command
 	}
 	var boeBlock strings.Builder
 	if len(preStart) == 0 {
-		boeBlock.WriteString("# Terminal 1 (from the repository root)\n")
+		boeBlock.WriteString(heading)
 	} else {
 		boeBlock.WriteString("# Start BOE in Terminal 1 after the pre-start commands complete.\n")
 	}

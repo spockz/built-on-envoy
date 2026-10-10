@@ -78,9 +78,8 @@ examples:
       - x-fault-added-delay
     code: |
       ```sh
-      # Terminal 1 (from the repository root)
-      boe run --local extensions/composer/dynamic-fault-injection --envoy-version \
-        1.38.0 --config '
+      # Terminal 1
+      boe run --extension dynamic-fault-injection --envoy-version 1.38.0 --config '
         {
           "endpoints": [
             {
@@ -111,7 +110,7 @@ examples:
       ```
 
       ```sh
-      # Terminal 2 (after Envoy is ready, from the repository root)
+      # Terminal 2 (after Envoy is ready)
       # Capture a successful upstream response with the sampled latency.
       # Repeat until HTTP 200, up to 1000 attempts.
       curl --disable --silent --show-error --verbose --user-agent boe-example \
@@ -125,15 +124,15 @@ examples:
       > Accept: */*
       >
       < HTTP/1.1 200 OK
-      < date: Sat, 03 Oct 2026 15:05:17 GMT
+      < date: Sat, 10 Oct 2026 11:59:03 GMT
       < content-type: text/html; charset=utf-8
       < content-length: 0
       < server: envoy
       < access-control-allow-origin: *
       < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 413
-      < x-fault-injected-delay: 377.800ms
-      < x-fault-actual-upstream: 414.962ms
+      < x-envoy-upstream-service-time: 385
+      < x-fault-injected-delay: 270.640ms
+      < x-fault-actual-upstream: 386.723ms
       < x-fault-status: 200
       < x-fault-upstream-status: 200
       < x-fault-requests-in-flight: 0
@@ -164,13 +163,13 @@ examples:
       < HTTP/1.1 503 Service Unavailable
       < content-type: text/plain
       < x-fault-injected: abort
-      < x-fault-injected-delay: 4.000ms
-      < x-fault-actual-upstream: 409.826ms
+      < x-fault-injected-delay: 4.400ms
+      < x-fault-actual-upstream: 405.266ms
       < x-fault-status: 503
       < x-fault-upstream-status: 200
       < x-fault-requests-in-flight: 0
       < content-length: 24
-      < date: Sat, 03 Oct 2026 15:05:54 GMT
+      < date: Sat, 10 Oct 2026 11:59:09 GMT
       < server: envoy
       <
       ```

@@ -21,10 +21,17 @@ The aggregate `check` target depends on the separate `check-examples` target.
   from `{}` and are invalid for executable examples. Existing code-only examples remain valid.
 - Start the selected extension through the current checkout's local BOE execution path, wait
   for Envoy readiness, and run commands against it. Never substitute expected output for execution.
+- Execute BOE with `--local` against the checkout, but display `--extension` with the manifest's
+  published extension name. Recorded output verifies the checkout; published releases can differ
+  until those changes are released. Require the repository root in displayed commands only when
+  they reference staged repository fixtures.
 - Optional `preStart` commands prepare inputs before BOE starts. Stage fixtures first, then run
   these commands in order in the same isolated work directory used by later commands. Share command
   execution, timeout, capture, and `expectedExit` handling with `commands`; a pre-start failure
   prevents BOE startup and all manifest writes. Processes must finish before the next step.
+- Pin external example inputs to immutable revisions and make download commands fail on HTTP
+  errors. Dependency updates require changing the pin, regenerating, and reviewing the transcript;
+  unrelated checks must not silently adopt changes from a mutable branch.
 - Timeouts and cancellation always fail, regardless of `expectedExit`. Kill the command process
   group on cancellation and bound output-pipe waiting so shell children cannot outlive a timed-out
   command. Cleanup failures must remain errors even when a nonzero exit was expected.
@@ -197,7 +204,7 @@ Comparison invariants:
   Configuration resolves the working-directory placeholder relative to the repository root;
   command arguments resolve it to `.` in that fixture directory. No temporary directory setup
   or exported working-directory variable is shown. Without fixtures, displayed commands use
-  the repository root.
+  the current directory.
 - Startup and commands are bounded by timeouts. Clean up BOE, command process groups, and
   temporary directories on success or failure. Lifecycle management remains internal to the tool.
 - Execute and validate every selected example before writing any manifest. A failed example

@@ -184,8 +184,8 @@ examples:
           - "${PROXY_URL}/post"
     code: |
       ```sh
-      # Terminal 1 (from the repository root)
-      boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '
+      # Terminal 1
+      boe run --extension coraza-waf --envoy-version 1.38.0 --config '
         {
           "directives": [
             "Include @coraza.conf",
@@ -198,7 +198,7 @@ examples:
       ```
 
       ```sh
-      # Terminal 2 (after Envoy is ready, from the repository root)
+      # Terminal 2 (after Envoy is ready)
       # Try sending a SQL injection payload and see the request rejected.
       curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
         --request POST --data '1%27%20ORDER%20BY%203--%2B' http://localhost:10000/post
@@ -213,7 +213,7 @@ examples:
       > Content-Type: application/x-www-form-urlencoded
       >
       < HTTP/1.1 403 Forbidden
-      < date: Sat, 03 Oct 2026 11:31:45 GMT
+      < date: Sat, 10 Oct 2026 11:59:12 GMT
       < server: envoy
       < content-length: 0
       <
@@ -224,12 +224,12 @@ examples:
       The following example demonstrates how to load a CRS plugin from the local filesystem and run the WAF plugin
       with recommended OWASP CRS rules.
 
-      It first downloads the WordPress rule exclusions plugin to a local file, enables blocking with
+      It first downloads a pinned revision of the WordPress rule exclusions plugin to a local file, enables blocking with
       `SecRuleEngine On`, and includes the downloaded plugin file. The same SQL injection
       payload that would normally be blocked is no longer blocked because the plugin excludes this specific attack
       vector.
     preStart:
-      - comment: Download the WordPress rule exclusions plugin before starting WAF.
+      - comment: Download the pinned WordPress rule exclusions plugin before starting WAF.
         argv:
           - curl
           - --fail
@@ -238,7 +238,7 @@ examples:
           - --location
           - --max-time
           - "30"
-          - https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/refs/heads/master/plugins/wordpress-rule-exclusions-before.conf
+          - https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/25828bc20b745d6ec938920d6fe3e8a4aa049b8e/plugins/wordpress-rule-exclusions-before.conf
           - --output
           - "${WORK_DIR}/wordpress-plugin-before.conf"
     config:
@@ -271,16 +271,16 @@ examples:
       - x-envoy-upstream-service-time
     code: |
       ```sh
-      # Terminal 1 (from the repository root)
-      # Download the WordPress rule exclusions plugin before starting WAF.
+      # Terminal 1
+      # Download the pinned WordPress rule exclusions plugin before starting WAF.
       curl --fail --silent --show-error --location --max-time 30 \
-        https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/refs/heads/master/plugins/wordpress-rule-exclusions-before.conf \
+        https://raw.githubusercontent.com/coreruleset/wordpress-rule-exclusions-plugin/25828bc20b745d6ec938920d6fe3e8a4aa049b8e/plugins/wordpress-rule-exclusions-before.conf \
         --output ./wordpress-plugin-before.conf
       ```
 
       ```sh
       # Start BOE in Terminal 1 after the pre-start commands complete.
-      boe run --local extensions/composer/waf --envoy-version 1.38.0 --config '
+      boe run --extension coraza-waf --envoy-version 1.38.0 --config '
         {
           "directives": [
             "Include @coraza.conf",
@@ -294,7 +294,7 @@ examples:
       ```
 
       ```sh
-      # Terminal 2 (after Envoy is ready, from the repository root)
+      # Terminal 2 (after Envoy is ready)
       # Send a WordPress request allowed by the plugin's rule exclusions.
       curl --silent --show-error --verbose --user-agent boe-example --max-time 10 \
         --request POST --header 'Content-Type: application/json' --data \
@@ -320,13 +320,13 @@ examples:
       > Content-Length: 45
       >
       < HTTP/1.1 404 Not Found
-      < date: Sat, 03 Oct 2026 11:57:33 GMT
+      < date: Sat, 10 Oct 2026 12:05:37 GMT
       < content-type: text/html
       < content-length: 233
       < server: envoy
       < access-control-allow-origin: *
       < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 465
+      < x-envoy-upstream-service-time: 403
       <
       ```
       <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NiwidGV4dCI6IiAifSx7ImxpbmUiOjE1LCJ0ZXh0IjoiICJ9XQ== -->

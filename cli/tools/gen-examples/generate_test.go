@@ -388,6 +388,8 @@ esac
 	require.NoError(t, yaml.Unmarshal(generated, &generatedManifest))
 	require.Equal(t, []string{"x-test-date", "x-test-duration"}, generatedManifest.Examples[0].VolatileHeaders)
 	transcript := generatedManifest.Examples[0].Code
+	require.Contains(t, transcript, "boe run --extension example-test")
+	require.NotContains(t, transcript, "--local")
 	require.Contains(t, transcript, "# Terminal 1 (from the repository root)")
 	require.Contains(t, transcript, "# Terminal 2 (after Envoy is ready, from the repository root)")
 	require.Contains(t, transcript, "http://localhost:10000")
@@ -418,8 +420,8 @@ esac
 	require.NotContains(t, transcript, "$ ")
 	_, err = os.Stat(commentMarker)
 	require.ErrorIs(t, err, os.ErrNotExist, "comment text must never be evaluated")
-	require.Contains(t, generatedManifest.Examples[1].Code, `--config '{"enabled":true}'`)
-	require.Contains(t, generatedManifest.Examples[2].Code, "--config '{}'")
+	require.Contains(t, generatedManifest.Examples[1].Code, `'{"enabled":true}'`)
+	require.Contains(t, generatedManifest.Examples[2].Code, "'{}'")
 	require.Contains(t, generatedManifest.Examples[1].Code, `printf '%s\n' scalar`)
 	require.Contains(t, generatedManifest.Examples[2].Code, `printf '%s\n' empty`)
 	noFixtureGenerated, err := os.ReadFile(noFixtureManifestPath) // #nosec G304 -- test reads its own temporary manifest.
@@ -427,6 +429,14 @@ esac
 	var noFixtureUpdated extensions.Manifest
 	require.NoError(t, yaml.Unmarshal(noFixtureGenerated, &noFixtureUpdated))
 	require.Contains(t, noFixtureUpdated.Examples[0].Code, `printf '%s\n' .`)
+	require.Contains(t, noFixtureUpdated.Examples[0].Code, "boe run --extension example-test-no-fixtures")
+	require.Contains(t, noFixtureUpdated.Examples[0].Code, "# Terminal 1\n")
+	require.Contains(t, noFixtureUpdated.Examples[0].Code, "# Terminal 2 (after Envoy is ready)\n")
+	require.NotContains(t, noFixtureUpdated.Examples[0].Code, "from the repository root")
+	boeArgs, err := os.ReadFile(boeArgsFile) // #nosec G304 -- test reads its own temporary argument capture.
+	require.NoError(t, err)
+	require.Contains(t, string(boeArgs), "\x00--local\x00"+noFixturePath+"\x00", "generation must execute the local checkout")
+	require.NotContains(t, string(boeArgs), "\x00--extension\x00", "generation must not fetch a published extension")
 	require.Equal(t, 2, strings.Count(noFixtureUpdated.Examples[0].Code, "```text\n.\n```"), "pre-start and later commands without fixtures use the repository-root work directory")
 	requireShellJSONArgument(t, transcript, map[string]any{
 		"endpoint":         "http://localhost:10000",
