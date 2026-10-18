@@ -463,6 +463,32 @@ func TestVolatileHeaderNamesYAML(t *testing.T) {
 	require.Equal(t, []string{"x-runtime", "X-Created-At"}, example.VolatileHeaders)
 }
 
+func TestExampleOutputElisionYAML(t *testing.T) {
+	base := "title: Example\ndescription: Test\nconfig: {}\ncommands:\n  - argv: [curl]\n"
+	for _, tc := range []struct {
+		name, source  string
+		want, invalid bool
+	}{
+		{name: "enabled", source: base + "elideOutput: true\n", want: true},
+		{name: "disabled", source: base + "elideOutput: false\n"},
+		{name: "omitted", source: base},
+		{name: "null", source: base + "elideOutput: null\n", invalid: true},
+		{name: "string", source: base + "elideOutput: 'true'\n", invalid: true},
+		{name: "requires executable example", source: "title: Example\ndescription: Test\ncode: example\nelideOutput: true\n", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var example Example
+			err := yaml.Unmarshal([]byte(tc.source), &example)
+			if tc.invalid {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, example.ElideOutput)
+		})
+	}
+}
+
 func TestManifestsForCatalog(t *testing.T) {
 	all, err := LoadManifests(internaltesting.ExtensionsFS(t), ".", false)
 	require.NoError(t, err)

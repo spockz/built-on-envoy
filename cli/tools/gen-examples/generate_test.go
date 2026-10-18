@@ -562,14 +562,14 @@ esac
 	require.Contains(t, transcript, "Trailing whitespace: ")
 	require.Contains(t, transcript, "Bare CR offsets: ")
 	comparisonCandidate := strings.ReplaceAll(transcript, "Tue, 03 Jan 2006 16:05:06 GMT", "Wed, 04 Jan 2006 17:06:07 GMT")
-	comparisonCandidate = strings.ReplaceAll(comparisonCandidate, "10ms", "25ms")
+	comparisonCandidate = strings.ReplaceAll(comparisonCandidate, "10ms", "25.500ms")
 	equal, compareErr := equivalentTranscript(transcript, comparisonCandidate, generatedManifest.Examples[0].Comparison, generatedManifest.Examples[0].VolatileHeaders)
 	require.NoError(t, compareErr)
 	require.True(t, equal, "captured volatile headers should normalize in the generated transcript")
 	require.NoError(t, yaml.Unmarshal(generated, &manifest))
 	beforeEquivalent, err := os.ReadFile(manifestPath) // #nosec G304 -- test reads its own temporary manifest.
 	require.NoError(t, err)
-	fixture := "printf 'HTTP/1.1 200 OK\\r\\nDate: Wed, 04 Jan 2006 17:06:07 GMT\\r\\nX-Test-Date: Wed, 04 Jan 2006 17:06:07 GMT\\r\\nX-Test-Duration: 25ms\\r\\nX-Test-Exact: stable\\r\\n\\r\\nbody\\r\\n'\n"
+	fixture := "printf 'HTTP/1.1 200 OK\\r\\nX-Test-Exact: stable\\r\\nX-Test-Duration: 25.500ms\\r\\nDate: Wed, 04 Jan 2006 17:06:07 GMT\\r\\nX-Test-Date: Wed, 04 Jan 2006 17:06:07 GMT\\r\\n\\r\\nbody\\r\\n'\n"
 	require.NoError(t, os.WriteFile(fixturePath, []byte(fixture), 0o600))
 	var equalOutput, equalErrors strings.Builder
 	opts.check = true
@@ -582,6 +582,12 @@ esac
 	require.NoError(t, err)
 	require.Equal(t, beforeEquivalent, afterEquivalent, "volatile response headers should preserve the reviewed transcript")
 	require.Contains(t, equalOutput.String(), "generated examples are current")
+	opts.check = false
+	require.NoError(t, generate(context.Background(), opts, &strings.Builder{}, &strings.Builder{}))
+	afterEquivalentUpdate, err := os.ReadFile(manifestPath) // #nosec G304 -- test reads its own temporary manifest.
+	require.NoError(t, err)
+	require.Equal(t, beforeEquivalent, afterEquivalentUpdate, "header order and millisecond precision changes must not overwrite reviewed examples")
+	opts.check = true
 
 	var commentChangedManifest extensions.Manifest
 	require.NoError(t, yaml.Unmarshal(beforeEquivalent, &commentChangedManifest))
@@ -627,7 +633,7 @@ esac
 	require.ErrorContains(t, generate(context.Background(), opts, &whitespaceOutput, &whitespaceDiff), "generated examples are stale")
 	require.Contains(t, whitespaceDiff.String(), "Trailing whitespace: ")
 	require.NoError(t, os.WriteFile(fakeCurl, []byte(curlScript), 0o600))
-	require.NoError(t, os.WriteFile(fixturePath, []byte(strings.ReplaceAll(fixture, "25ms", "25.5 ms")), 0o600))
+	require.NoError(t, os.WriteFile(fixturePath, []byte(strings.ReplaceAll(fixture, "25.500ms", "25.5 ms")), 0o600))
 	beforeFormatChange, err := os.ReadFile(manifestPath) // #nosec G304 -- test reads its own temporary manifest.
 	require.NoError(t, err)
 	var formatOutput, formatDiff strings.Builder

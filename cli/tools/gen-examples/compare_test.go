@@ -126,7 +126,14 @@ func TestEquivalentTranscriptDurationPreservesFormat(t *testing.T) {
 		{name: "leading zero padding", old: "1ms", current: "001ms", want: false},
 		{name: "same leading zero padding", old: "012ms", current: "034ms", want: true},
 		{name: "unit", old: "12ms", current: "12s", want: false},
-		{name: "fraction precision", old: "12.3ms", current: "12.34ms", want: false},
+		{name: "millisecond precision", old: "12.3ms", current: "12.34ms", want: true},
+		{name: "millisecond trailing zeros", old: "12.3ms", current: "12.300ms", want: true},
+		{name: "integer milliseconds", old: "12ms", current: "12.000ms", want: true},
+		{name: "integer milliseconds with spacing", old: "12 ms", current: "98.765 ms", want: true},
+		{name: "leading decimal point", old: ".5ms", current: "0.50ms", want: false},
+		{name: "second precision", old: "12.3s", current: "12.34s", want: false},
+		{name: "compound millisecond precision", old: "1s2.3ms", current: "9s8.765ms", want: true},
+		{name: "compound second precision", old: "1.2s3ms", current: "1.20s3.00ms", want: false},
 		{name: "spacing", old: "12 ms", current: "13  ms", want: false},
 		{name: "sign", old: "+12ms", current: "-13ms", want: false},
 		{name: "bare number", old: "12.34", current: "987.65", want: true},
@@ -247,14 +254,14 @@ func TestEquivalentTranscriptCustomRulesOnlyApplyInsideOutput(t *testing.T) {
 	old := "# Command: boe run --config created=2006-01-02T15:04:05.1Z\n" +
 		renderedOutput("# created=2006-01-02T15:04:05.1Z latency=12.3 ms\n# payload=preserved\n")
 	current := "# Command: boe run --config created=2006-01-03T16:05:06.1Z\n" +
-		renderedOutput("# created=2006-01-03T16:05:06.1Z latency=987.6 ms\n# payload=preserved\n")
+		renderedOutput("# created=2006-01-03T16:05:06.1Z latency=987.654 ms\n# payload=preserved\n")
 
 	equivalent, err := equivalentTranscript(old, current, rules, nil)
 	require.NoError(t, err)
 	require.False(t, equivalent, "the invocation must not be normalized")
 
 	current = "# Command: boe run --config created=2006-01-02T15:04:05.1Z\n" +
-		renderedOutput("# created=2006-01-03T16:05:06.1Z latency=987.6 ms\n# payload=preserved\n")
+		renderedOutput("# created=2006-01-03T16:05:06.1Z latency=987.654 ms\n# payload=preserved\n")
 	equivalent, err = equivalentTranscript(old, current, rules, nil)
 	require.NoError(t, err)
 	require.True(t, equivalent)

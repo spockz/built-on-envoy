@@ -5,6 +5,10 @@ This tool refreshes `examples[].code` in extension manifests by running BOE and 
 the declared configuration and commands. The existing extension Makefiles are its public
 entrypoints; Composer uses its existing manifest discovery to select child extensions.
 
+For an authoring walkthrough, see
+[Executable Extension Examples](../../../website/src/pages/docs/writing-extension-examples.mdx).
+This document defines the generator's requirements and comparison guarantees.
+
 ```sh
 make -C extensions update-examples EXTENSION_PATH=composer
 make -C extensions check EXTENSION_PATH=composer
@@ -61,8 +65,15 @@ The aggregate `check` target depends on the separate `check-examples` target.
   upstream requests therefore require network access.
 - `update-examples` replaces stale generated bodies. `check-examples` runs the same examples,
   reports meaningful differences, and exits unsuccessfully on drift without writing manifests.
-- Suppress changes to declared date or duration values only when their format is unchanged.
+- Suppress changes to declared date or duration values only when their format is unchanged,
+  except that millisecond values may change decimal precision, including integer notation.
   Keep the reviewed transcript when those are the only differences.
+- Ignore ordering between different response header names during comparison. Preserve the order
+  and count of repeated fields, and retain the captured order in generated examples.
+- Optional `elideOutput: true` allows authors to replace incidental captured output lines with
+  standalone `...` markers in `code`. Execute complete commands, compare retained values using
+  existing volatile rules, and ignore only explicitly omitted output. Never elide command failures
+  or recognized HTTP response status lines.
 
 ## Current execution boundaries
 
@@ -97,8 +108,10 @@ Existing examples expose these remaining gaps:
   [dynamic fault injection](../../../extensions/composer/dynamic-fault-injection/manifest.yaml)
   example captures each randomly sampled status in a separate command. This checks that both cases
   occur within the bound, not their probability. Status changes must never be normalized away.
-  Its verbose timing headers use milliseconds with three decimal places. The added-delay header
-  appears only when the upstream needs more delay; that presence change remains visible as drift.
+  Its verbose timing headers retain Go's duration formatting. Millisecond decimal precision is
+  ignored during comparison. The added-delay header appears only when the upstream needs more
+  delay; its presence change is drift if retained. The example deliberately elides that conditional
+  header while retaining the response status and the other timing headers.
 - Decoder examples illustrate dynamic metadata in comments. Curl cannot observe those values,
   and current decoder logs do not expose them. A downstream observer filter or configured metadata
   access log is needed to generate that output; successful BOE logs are not captured by this tool.
@@ -162,15 +175,69 @@ Comparison invariants:
   between date and duration, or between a recognized and unrecognized value, produces drift.
 - Unrecognized or invalid values compare exactly. Inference never makes arbitrary strings
   interchangeable.
-- Magnitudes and calendar values can change. Units, spacing, signs, fractional precision,
-  zero padding, date layout, and timezone notation remain significant.
-- Header spelling, casing, separators, order, presence, and occurrence count remain significant.
+- Magnitudes and calendar values can change. Decimal precision and integer-versus-decimal
+  notation are ignored for `ms` components, including in compound durations. Units, spacing,
+  signs, leading decimal points, zero padding, date layout, timezone notation, and fractional
+  precision in other units and dates remain significant. Bare numbers retain their precision.
+- Compare complete response header sections independently, including interim responses. Ordering
+  between different names is insignificant; names are grouped case-insensitively, preserving the
+  order of repeated fields. Header spelling, casing, separators, presence, and occurrence count
+  remain significant. Requests, bodies, preambles, and incomplete or malformed sections remain literal.
+- Whitespace and line-ending metadata move with their header during comparison. Preserve metadata
+  encoding and byte-format changes; malformed metadata prevents order normalization. Custom rules
+  match original output before header reordering, so comparison cannot create new pattern matches.
 - Header rules apply only inside captured HTTP response header sections. They never normalize
   configuration, commands, HTTP status, response body text, or other headers.
 - Custom `comparison` rules retain their explicit `type` and exactly one named `value` capture.
   They match captured response text, not generated shell commands or output metadata.
 - Generated output retains observed values; inference affects comparison only. Line-ending style,
   bare carriage returns, trailing whitespace, and the presence of a final newline remain significant.
+
+## Output elision
+
+Set `elideOutput: true` on an executable example, generate its complete transcript, then replace
+incidental lines inside its fenced `text` output with standalone `...` lines. Run `update-examples`
+once after editing so the generator refreshes byte-format metadata for the retained excerpt.
+There is no second expected-output template. Without the opt-in, all dots remain literal.
+
+The whole-line semantics follow Istio's
+[`_verify_elided`](https://github.com/istio/istio.io/blob/master/tests/README.md#verify-functions):
+each marker matches one or more complete lines, including blank lines. Markers can appear at the
+start, middle, or end; consecutive markers each require at least one line. Inline or indented dots
+remain literal. Matching is anchored to the entire output block, independently for each stream.
+
+For example, this output keeps the response status, a timing header, and the relevant body fields:
+
+```text
+HTTP/1.1 200 OK
+X-Latency: 12.3ms
+...
+
+first
+...
+last
+```
+
+Declare `X-Latency` in `volatileHeaders` to accept changing magnitudes and millisecond precision,
+while still detecting a different unit or invalid value. Custom date/duration comparison rules
+also work with elision. Recognition uses the complete fresh capture before selecting lines, so
+omitting framing never promotes HTTP-looking body text into headers. Keep header terminators
+when selecting individual headers to retain comparison independent of field order. Repeated
+retained fields keep their relative order; elided headers may be added, removed, or changed provided
+each marker still omits at least one line. Recognized HTTP status lines must remain in the excerpt.
+
+Omitted output is deliberately outside the example's verification scope, including its format.
+Retained lines still preserve line endings, trailing whitespace, bare carriage returns, and final
+newline state. Metadata describes only the retained excerpt and synthetic LF-terminated markers.
+Equivalent generation preserves the reviewed transcript and observed values. A mismatch in a
+retained line expands that output block to the complete actual capture for review; generation does
+not guess which changed lines to hide. Other matching excerpts remain compact. Format-only changes
+in retained byte metadata refresh that excerpt without expanding it.
+
+Commands, comments, configurations, fences, stream boundaries, exit-code checks, retry status
+selection, timeouts, and cleanup retain their existing behavior. Elision neither retries arbitrary
+mismatches nor accepts a failed command. The check target never writes, including when metadata
+needs refreshing after an author edits an excerpt.
 
 ## Execution and update invariants
 

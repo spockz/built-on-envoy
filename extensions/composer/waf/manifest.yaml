@@ -171,6 +171,7 @@ examples:
       By default WAF is configured in `DetectionOnly` mode, which means it will only log detected attacks without
       blocking them. To enable active blocking, this example sets `SecRuleEngine On` in the configuration. It also
       sets `SecResponseBodyAccess Off` to disable response body inspection as it's not needed for the example.
+      Standard request and response headers are omitted from the transcript.
     config:
       directives:
         - Include @coraza.conf
@@ -194,6 +195,7 @@ examples:
           - --data
           - "1%27%20ORDER%20BY%203--%2B"
           - "${PROXY_URL}/post"
+    elideOutput: true
     code: |
       ```sh
       # Terminal 1
@@ -218,19 +220,12 @@ examples:
 
       ```text
       > POST /post HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      > Content-Length: 26
-      > Content-Type: application/x-www-form-urlencoded
-      >
+      ...
       < HTTP/1.1 403 Forbidden
-      < date: Sat, 10 Oct 2026 11:59:12 GMT
-      < server: envoy
-      < content-length: 0
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NiwidGV4dCI6IiAifSx7ImxpbmUiOjExLCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifV0= -->
   - title: CRS plugin from local filesystem
     description: |
       The following example demonstrates how to load a CRS plugin from the local filesystem and run the WAF plugin
@@ -240,6 +235,8 @@ examples:
       `SecRuleEngine On`, and includes the downloaded plugin file. The same SQL injection
       payload that would normally be blocked is no longer blocked because the plugin excludes this specific attack
       vector.
+      With the default httpbin upstream, the forwarded WordPress path returns 404 rather than the WAF's 403.
+      Standard headers and the upstream's HTML error body are omitted from the transcript.
     preStart:
       - comment: Download the pinned WordPress rule exclusions plugin before starting WAF.
         argv:
@@ -281,6 +278,7 @@ examples:
           - "${PROXY_URL}/wp-json/wp/v2/posts/1"
     volatileHeaders:
       - x-envoy-upstream-service-time
+    elideOutput: true
     code: |
       ```sh
       # Terminal 1
@@ -315,30 +313,16 @@ examples:
       ```
 
       ```text
-      <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
-      <title>404 Not Found</title>
-      <h1>Not Found</h1>
-      <p>The requested URL was not found on the server.  If you entered the URL manually please check your spelling and try again.</p>
+      ...
       ```
-      <!-- stdout; Line endings: LF,LF,LF,LF -->
+      <!-- stdout; Line endings: LF -->
 
 
       ```text
       > POST /wp-json/wp/v2/posts/1 HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      > Content-Type: application/json
-      > Content-Length: 45
-      >
+      ...
       < HTTP/1.1 404 Not Found
-      < date: Sat, 10 Oct 2026 12:05:37 GMT
-      < content-type: text/html
-      < content-length: 233
-      < server: envoy
-      < access-control-allow-origin: *
-      < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 403
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NiwidGV4dCI6IiAifSx7ImxpbmUiOjE1LCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifV0= -->

@@ -47,9 +47,17 @@ type transcriptPart struct {
 }
 
 type outputBlock struct {
-	kind string
-	body string
-	raw  bool
+	kind     string
+	body     string
+	metadata string
+	raw      bool
+	start    int
+	end      int
+}
+
+type normalizedOutput struct {
+	segments []bodySegment
+	metadata string
 }
 
 type bodySegment struct {
@@ -189,6 +197,10 @@ func validateVolatileType(typeName string) error {
 
 func splitTranscript(transcript string) []transcriptPart {
 	lines := strings.SplitAfter(transcript, "\n")
+	offsets := make([]int, len(lines)+1)
+	for index, line := range lines {
+		offsets[index+1] = offsets[index] + len(line)
+	}
 	parts := make([]transcriptPart, 0)
 	var literal strings.Builder
 	for index := 0; index < len(lines); {
@@ -212,9 +224,20 @@ func splitTranscript(transcript string) []transcriptPart {
 				parts = append(parts, transcriptPart{literal: literal.String()})
 				literal.Reset()
 			}
-			parts = append(parts, transcriptPart{block: &outputBlock{kind: "text", body: strings.Join(lines[index+1:end], ""), raw: true}})
+			block := &outputBlock{kind: "text", body: strings.Join(lines[index+1:end], ""), raw: true, start: offsets[index]}
+			parts = append(parts, transcriptPart{block: block})
 			literal.WriteString(lines[end])
 			index = end + 1
+			metadataIndex := index
+			if metadataIndex < len(lines) && lines[metadataIndex] == "\n" {
+				metadataIndex++
+			}
+			if metadataIndex < len(lines) && isOutputMetadata(lines[metadataIndex]) {
+				literal.WriteString(strings.Join(lines[index:metadataIndex], ""))
+				block.metadata = lines[metadataIndex]
+				index = metadataIndex + 1
+			}
+			block.end = offsets[index]
 			continue
 		}
 		kind, endMarker, isOutput := outputBlockStart(lines[index])
@@ -285,8 +308,12 @@ func outputBlockStart(line string) (kind, endMarker string, found bool) {
 }
 
 func equivalentOutputBlock(old, current outputBlock, rules []comparisonRule, headers map[string]struct{}) bool {
-	oldSegments := normalizeOutputBlock(old, rules, headers)
-	newSegments := normalizeOutputBlock(current, rules, headers)
+	oldOutput := normalizeOutputBlock(old, rules, headers)
+	newOutput := normalizeOutputBlock(current, rules, headers)
+	if oldOutput.metadata != newOutput.metadata {
+		return false
+	}
+	oldSegments, newSegments := oldOutput.segments, newOutput.segments
 	if len(oldSegments) != len(newSegments) {
 		return false
 	}
@@ -305,7 +332,28 @@ func equivalentOutputBlock(old, current outputBlock, rules []comparisonRule, hea
 	return true
 }
 
-func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map[string]struct{}) []bodySegment {
+func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map[string]struct{}) normalizedOutput {
+	captures := outputCaptures(block, rules, headers)
+	block, captures = canonicalHeaderOrder(block, captures)
+	body := block.body
+	captures = nonOverlappingCaptures(captures)
+	segments := make([]bodySegment, 0, len(captures)*2+1)
+	start := 0
+	for _, capture := range captures {
+		if capture.start > start {
+			segments = append(segments, bodySegment{literal: body[start:capture.start]})
+		}
+		value := capture.value
+		segments = append(segments, bodySegment{value: &value})
+		start = capture.end
+	}
+	if start < len(body) || len(segments) == 0 {
+		segments = append(segments, bodySegment{literal: body[start:]})
+	}
+	return normalizedOutput{segments: segments, metadata: block.metadata}
+}
+
+func outputCaptures(block outputBlock, rules []comparisonRule, headers map[string]struct{}) []capture {
 	body := block.body
 	captures := headerCaptures(block, headers)
 	raw, positions := rawOutput(block)
@@ -326,21 +374,7 @@ func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map
 		}
 	}
 
-	captures = nonOverlappingCaptures(captures)
-	segments := make([]bodySegment, 0, len(captures)*2+1)
-	start := 0
-	for _, capture := range captures {
-		if capture.start > start {
-			segments = append(segments, bodySegment{literal: body[start:capture.start]})
-		}
-		value := capture.value
-		segments = append(segments, bodySegment{value: &value})
-		start = capture.end
-	}
-	if start < len(body) || len(segments) == 0 {
-		segments = append(segments, bodySegment{literal: body[start:]})
-	}
-	return segments
+	return nonOverlappingCaptures(captures)
 }
 
 func rawOutput(block outputBlock) (string, []int) {
@@ -408,23 +442,31 @@ func outputMetadataLine(line string) bool {
 }
 
 func headerCaptures(block outputBlock, headers map[string]struct{}) []capture {
-	if block.raw {
-		return rawHeaderCaptures(block.body, headers)
+	captures := make([]capture, 0)
+	for _, section := range responseHeaderSections(block) {
+		for _, header := range section.headers {
+			if _, found := headers[header.name]; !found {
+				continue
+			}
+			value, valid := inferHeaderValue(header.name, block.body[header.valueStart:header.valueEnd])
+			if valid {
+				captures = append(captures, capture{start: header.valueStart, end: header.valueEnd, value: value})
+			}
+		}
 	}
-	return legacyHeaderCaptures(block.body, headers)
+	return captures
 }
 
-func legacyHeaderCaptures(body string, headers map[string]struct{}) []capture {
-	lines := transcriptLines(body)
-	index := nextPayloadLine(lines, 0)
-	if index >= len(lines) {
-		return nil
-	}
-	status, ok := responseLine(lines[index], "# ")
-	if !ok || !rawStatusPattern.MatchString(status) {
-		return nil
-	}
-	return responseHeaderCaptures(lines, index, "# ", headers)
+type responseHeader struct {
+	name       string
+	line       int
+	valueStart int
+	valueEnd   int
+}
+
+type responseHeaderSection struct {
+	headers    []responseHeader
+	statusLine int
 }
 
 func nextPayloadLine(lines []transcriptLine, index int) int {
@@ -434,16 +476,25 @@ func nextPayloadLine(lines []transcriptLine, index int) int {
 	return index
 }
 
-func rawHeaderCaptures(body string, headers map[string]struct{}) []capture {
-	lines := transcriptLines(body)
+func responseHeaderStart(block outputBlock, lines []transcriptLine) (int, string, bool) {
 	if len(lines) == 0 {
-		return nil
+		return 0, "", false
+	}
+	if !block.raw {
+		index := nextPayloadLine(lines, 0)
+		if index < len(lines) {
+			status, ok := responseLine(lines[index], "# ")
+			if ok && rawStatusPattern.MatchString(status) {
+				return index, "# ", true
+			}
+		}
+		return 0, "", false
 	}
 	if rawStatusPattern.MatchString(lines[0].text) {
-		return responseHeaderCaptures(lines, 0, "", headers)
+		return 0, "", true
 	}
 	if !requestStartPattern.MatchString(lines[0].text) {
-		return nil
+		return 0, "", false
 	}
 	index := 1
 	for index < len(lines) {
@@ -452,60 +503,76 @@ func rawHeaderCaptures(body string, headers map[string]struct{}) []capture {
 			index++
 			break
 		}
-		if !strings.HasPrefix(line, "> ") || rawHeaderPattern.FindStringSubmatchIndex(line[2:]) == nil {
-			return nil
+		if !strings.HasPrefix(line, "> ") {
+			return 0, "", false
+		}
+		match := rawHeaderPattern.FindStringSubmatchIndex(line[2:])
+		if match == nil || !validHeaderName(strings.ToLower(line[2+match[2]:2+match[3]])) {
+			return 0, "", false
 		}
 		index++
 	}
 	if index >= len(lines) || !strings.HasPrefix(lines[index].text, "< ") || !rawStatusPattern.MatchString(lines[index].text[2:]) {
-		return nil
+		return 0, "", false
 	}
-	return responseHeaderCaptures(lines, index, "< ", headers)
+	return index, "< ", true
 }
 
-func responseHeaderCaptures(lines []transcriptLine, index int, prefix string, headers map[string]struct{}) []capture {
-	captures := make([]capture, 0)
+func responseHeaderSections(block outputBlock) []responseHeaderSection {
+	lines := transcriptLines(block.body)
+	index, prefix, found := responseHeaderStart(block, lines)
+	if !found {
+		return nil
+	}
+	sections := make([]responseHeaderSection, 0)
 	for index < len(lines) {
 		status, ok := responseLine(lines[index], prefix)
 		if !ok {
-			return captures
+			return sections
 		}
 		statusMatch := rawStatusPattern.FindStringSubmatch(status)
 		if statusMatch == nil {
-			return captures
+			return sections
 		}
 		statusCode := statusMatch[1]
+		section := responseHeaderSection{statusLine: index}
 		index++
+		complete := false
 		for index < len(lines) {
 			text, ok := responseLine(lines[index], prefix)
 			if !ok {
-				return captures
+				return sections
 			}
 			if text == "\n" || text == "\r\n" || text == "" {
 				index++
+				complete = true
 				break
 			}
 			match := rawHeaderPattern.FindStringSubmatchIndex(text)
 			if match == nil {
-				return captures
+				return sections
 			}
 			nameStart, nameEnd := match[2], match[3]
 			name := strings.ToLower(text[nameStart:nameEnd])
-			if _, found := headers[name]; found {
-				valueStart, valueEnd := match[6], match[7]
-				valueText := text[valueStart:valueEnd]
-				value, valid := inferHeaderValue(name, valueText)
-				if valid {
-					captures = append(captures, capture{start: lines[index].offset + len(prefix) + valueStart, end: lines[index].offset + len(prefix) + valueEnd, value: value})
-				}
+			if !validHeaderName(name) {
+				return sections
 			}
+			section.headers = append(section.headers, responseHeader{
+				name: name, line: index,
+				valueStart: lines[index].offset + len(prefix) + match[6],
+				valueEnd:   lines[index].offset + len(prefix) + match[7],
+			})
 			index++
 		}
+		if !complete {
+			return sections
+		}
+		sections = append(sections, section)
 		if statusCode != "100" && statusCode != "102" && statusCode != "103" {
-			return captures
+			return sections
 		}
 	}
-	return captures
+	return sections
 }
 
 func responseLine(line transcriptLine, prefix string) (string, bool) {
@@ -663,14 +730,19 @@ func durationSignature(value string) (durationFormat, bool) {
 		space := bare[part[2]:part[3]]
 		unit := bare[part[4]:part[5]]
 		number := strings.TrimSuffix(matched, space+unit)
-		format.parts = append(format.parts, durationPartFormat{
+		partFormat := durationPartFormat{
 			space:         space,
 			unit:          unit,
 			fraction:      fractionalDigits(number),
 			hasPeriod:     strings.Contains(number, "."),
 			leadingPeriod: strings.HasPrefix(number, "."),
 			leadingZeros:  redundantLeadingZeros(number),
-		})
+		}
+		if unit == "ms" {
+			partFormat.fraction = 0
+			partFormat.hasPeriod = false
+		}
+		format.parts = append(format.parts, partFormat)
 		compact.WriteString(number)
 		compact.WriteString(unit)
 		position = part[1]

@@ -490,6 +490,9 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 	}
 	generatedCode := strings.TrimRight(transcript.String(), "\n") + "\n"
 	oldCode := example.Code
+	if example.ElideOutput {
+		return reconcileElidedTranscript(oldCode, generatedCode, example.Comparison, example.VolatileHeaders)
+	}
 	equal, err := equivalentTranscript(oldCode, generatedCode, example.Comparison, example.VolatileHeaders)
 	if err != nil {
 		return "", fmt.Errorf("compare generated transcript: %w", err)

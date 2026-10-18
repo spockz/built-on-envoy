@@ -113,7 +113,7 @@ Commands executed sequentially against the running extension to generate code.
 
 #### examples.comparison
 
-Scoped comparison rules for date and duration values in captured output, beyond HTTP headers. Invalid values and format changes remain visible.
+Scoped comparison rules for date and duration values in captured output, beyond HTTP headers. Decimal precision is ignored for ms components. Response header order may vary between different names; repeated headers retain their order. Invalid values and other format changes remain visible.
 
 | | |
 |---|---|
@@ -151,6 +151,19 @@ Explanation of what the example demonstrates.
 
 
 
+#### examples.elideOutput
+
+Allow standalone ... lines in recorded output to omit one or more complete output lines. Retained values still follow volatile comparison rules. Commands and output streams remain significant.
+
+| | |
+|---|---|
+| **Type** | `boolean` |
+| **Required** | No |
+
+[↑ Top](#) | [↑ Extension Manifest](#reference)
+
+
+
 #### examples.preStart
 
 Commands executed sequentially before starting the extension.
@@ -181,7 +194,7 @@ Short title for the example.
 
 #### examples.volatileHeaders
 
-Case-insensitive response header names whose values vary between runs. Date and duration formats are inferred; only values with the same recognized type and format compare equal. Unrecognized values compare exactly. HTTP Date headers are handled automatically as dates.
+Case-insensitive response header names whose values vary between runs. Date and duration formats are inferred; values with the same recognized type and format compare equal, ignoring decimal precision for ms components. Unrecognized values compare exactly. HTTP Date headers are handled automatically as dates.
 
 | | |
 |---|---|

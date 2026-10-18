@@ -144,7 +144,8 @@
           "commands": ["config"],
           "preStart": ["config", "commands"],
           "comparison": ["config", "commands"],
-          "volatileHeaders": ["config", "commands"]
+          "volatileHeaders": ["config", "commands"],
+          "elideOutput": ["config", "commands"]
         },
         "additionalProperties": false,
         "properties": {
@@ -181,15 +182,19 @@
           },
           "volatileHeaders": {
             "type": "array",
-            "description": "Case-insensitive response header names whose values vary between runs. Date and duration formats are inferred; only values with the same recognized type and format compare equal. Unrecognized values compare exactly. HTTP Date headers are handled automatically as dates.",
+            "description": "Case-insensitive response header names whose values vary between runs. Date and duration formats are inferred; values with the same recognized type and format compare equal, ignoring decimal precision for ms components. Unrecognized values compare exactly. HTTP Date headers are handled automatically as dates.",
             "items": {
               "type": "string",
               "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
             }
           },
+          "elideOutput": {
+            "type": "boolean",
+            "description": "Allow standalone ... lines in recorded output to omit one or more complete output lines. Retained values still follow volatile comparison rules. Commands and output streams remain significant."
+          },
           "comparison": {
             "type": "array",
-            "description": "Scoped comparison rules for date and duration values in captured output, beyond HTTP headers. Invalid values and format changes remain visible.",
+            "description": "Scoped comparison rules for date and duration values in captured output, beyond HTTP headers. Decimal precision is ignored for ms components. Response header order may vary between different names; repeated headers retain their order. Invalid values and other format changes remain visible.",
             "items": {
               "type": "object",
               "required": ["type", "pattern"],

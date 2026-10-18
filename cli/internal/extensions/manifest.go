@@ -88,6 +88,7 @@ type (
 		Commands        []ExampleCommand        `yaml:"commands,omitempty" json:"commands,omitempty"`
 		Comparison      []ExampleComparisonRule `yaml:"comparison,omitempty" json:"comparison,omitempty"`
 		VolatileHeaders []string                `yaml:"volatileHeaders,omitempty" json:"volatileHeaders,omitempty"`
+		ElideOutput     bool                    `yaml:"elideOutput,omitempty" json:"elideOutput,omitempty"`
 	}
 
 	// ExampleCommand stores argument boundaries for execution and transcript rendering.

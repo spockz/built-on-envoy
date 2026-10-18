@@ -21,9 +21,10 @@ license: Apache-2.0
 examples:
   - title: Delay all success responses and introduce a 1% failure rate that returns quickly
     description: |
-      Wrap a fast, successful mock service to simulate production latency and an approximately 1% failure rate.
+      Apply sampled latency and an approximately 1% failure rate to successful upstream responses.
       Capture one 200 response and one injected 503 response by retrying until each status occurs.
-      Show the original HTTP exchange, including the fault headers and response body.
+      Show the request, response status, sampled timings, fault statuses, and abort body.
+      Standard headers and the conditional added-delay header are omitted from the transcript.
       This demonstrates both response cases without measuring the failure rate.
     config:
       endpoints:
@@ -76,6 +77,7 @@ examples:
       - x-fault-injected-delay
       - x-fault-actual-upstream
       - x-fault-added-delay
+    elideOutput: true
     code: |
       ```sh
       # Terminal 1
@@ -119,26 +121,17 @@ examples:
 
       ```text
       > GET /status/200 HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      >
+      ...
       < HTTP/1.1 200 OK
-      < date: Sat, 10 Oct 2026 11:59:03 GMT
-      < content-type: text/html; charset=utf-8
-      < content-length: 0
-      < server: envoy
-      < access-control-allow-origin: *
-      < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 385
-      < x-fault-injected-delay: 270.640ms
-      < x-fault-actual-upstream: 386.723ms
+      ...
+      < x-fault-injected-delay: 324.69ms
+      < x-fault-actual-upstream: 383.490542ms
       < x-fault-status: 200
       < x-fault-upstream-status: 200
-      < x-fault-requests-in-flight: 0
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjE4LCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF,CRLF,CRLF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6OSwidGV4dCI6IiAifV0= -->
 
 
       ```sh
@@ -156,24 +149,18 @@ examples:
 
       ```text
       > GET /status/200 HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      >
+      ...
       < HTTP/1.1 503 Service Unavailable
-      < content-type: text/plain
+      ...
       < x-fault-injected: abort
-      < x-fault-injected-delay: 4.400ms
-      < x-fault-actual-upstream: 405.266ms
+      < x-fault-injected-delay: 3.4ms
+      < x-fault-actual-upstream: 498.525958ms
       < x-fault-status: 503
       < x-fault-upstream-status: 200
-      < x-fault-requests-in-flight: 0
-      < content-length: 24
-      < date: Sat, 10 Oct 2026 11:59:09 GMT
-      < server: envoy
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjE2LCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF,CRLF,CRLF,CRLF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6MTAsInRleHQiOiIgIn1d -->
 type: go
 longDescription: |
   # Envoy Latency and Fault Distribution Simulation
@@ -327,12 +314,11 @@ longDescription: |
 
   ## Response Headers
 
-  The filter adds response headers to indicate what was injected. Timing values use milliseconds
-  with three decimal places (e.g., "52.300ms"), rounded to the nearest microsecond:
+  The filter adds response headers to indicate what was injected:
 
   | Header | Description |
   |--------|-------------|
-  | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.300ms") |
+  | `x-fault-injected-delay` | Target duration from the distribution (e.g., "52.3ms") |
   | `x-fault-actual-upstream` | Actual time the upstream took to respond |
   | `x-fault-added-delay` | Additional delay injected (target - upstream); omitted when no delay was added |
   | `x-fault-requests-in-flight` | Process-global in-flight matched request count observed at request entry, before the request is added |

@@ -118,6 +118,7 @@ examples:
       Run the OPA extension with a simple Rego policy that allows or denies
       requests based on the request path. The inline policy allows requests
       to the default httpbin upstream's status endpoints and denies other paths.
+      The transcript shows request lines, response statuses, and the denial body; standard headers are omitted.
     config:
       policies:
         - inline: |
@@ -135,6 +136,7 @@ examples:
         argv: [curl, --silent, --show-error, --verbose, --user-agent, boe-example, --max-time, "10", "${PROXY_URL}/private/resource"]
     volatileHeaders:
       - x-envoy-upstream-service-time
+    elideOutput: true
     code: |
       ```sh
       # Terminal 1
@@ -157,21 +159,12 @@ examples:
 
       ```text
       > GET /status/200 HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      >
+      ...
       < HTTP/1.1 200 OK
-      < date: Sat, 10 Oct 2026 11:59:10 GMT
-      < content-type: text/html; charset=utf-8
-      < content-length: 0
-      < server: envoy
-      < access-control-allow-origin: *
-      < access-control-allow-credentials: true
-      < x-envoy-upstream-service-time: 384
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjEzLCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifV0= -->
 
 
       ```sh
@@ -188,18 +181,12 @@ examples:
 
       ```text
       > GET /private/resource HTTP/1.1
-      > Host: localhost:10000
-      > User-Agent: boe-example
-      > Accept: */*
-      >
+      ...
       < HTTP/1.1 403 Forbidden
-      < content-length: 9
-      < content-type: text/plain
-      < date: Sat, 10 Oct 2026 11:59:10 GMT
-      < server: envoy
+      ...
       <
       ```
-      <!-- stderr; Line endings: CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifSx7ImxpbmUiOjEwLCJ0ZXh0IjoiICJ9XQ== -->
+      <!-- stderr; Line endings: CRLF,LF,CRLF,LF,CRLF; Trailing whitespace: W3sibGluZSI6NCwidGV4dCI6IiAifV0= -->
   - title: Custom Deny Response
     description: |
       Use a policy that returns a structured object with custom HTTP status,
