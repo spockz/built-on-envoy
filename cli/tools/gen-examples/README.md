@@ -1,293 +1,195 @@
-<!-- This contract lives beside the generator so future changes preserve executable examples and meaningful diffs. -->
-# Executable example generator
+<!-- This contract keeps execution and comparison guarantees beside the generator. -->
+# Executable example generator contract
 
-This tool refreshes `examples[].code` in extension manifests by running BOE and Envoy against
-the declared configuration and commands. The existing extension Makefiles are its public
-entrypoints; Composer uses its existing manifest discovery to select child extensions.
-
-For an authoring walkthrough, see
+For manifest authoring, see
 [Executable Extension Examples](../../../website/src/pages/docs/writing-extension-examples.mdx).
-This document defines the generator's requirements and comparison guarantees.
+The extension Makefiles select manifests; Composer reuses its child-manifest discovery.
 
 ```sh
 make -C extensions update-examples EXTENSION_PATH=composer
-make -C extensions check EXTENSION_PATH=composer
 make -C extensions check-examples EXTENSION_PATH=composer
 make -C extensions test-examples EXTENSION_PATH=composer
 ```
 
-The aggregate `check` target depends on the separate `check-examples` target.
+The aggregate `check` target includes `check-examples`.
 
-## Requirements
+## Manifest inputs
 
-- Authors supply `config` and ordered `commands[].argv`; they can omit `code` until generation.
-  A present empty configuration object is valid. Missing configuration and `null` are distinct
-  from `{}` and are invalid for executable examples. Existing code-only examples remain valid.
-- Start the selected extension through the current checkout's local BOE execution path, wait
-  for Envoy readiness, and run commands against it. Never substitute expected output for execution.
-- Execute BOE with `--local` against the checkout, but display `--extension` with the manifest's
-  published extension name. Recorded output verifies the checkout; published releases can differ
-  until those changes are released. Require the repository root in displayed commands only when
-  they reference staged repository fixtures.
-- Optional `preStart` commands prepare inputs before BOE starts. Stage fixtures first, then run
-  these commands in order in the same isolated work directory used by later commands. Share command
-  execution, timeout, capture, and `expectedExit` handling with `commands`; a pre-start failure
-  prevents BOE startup and all manifest writes. Processes must finish before the next step.
-- Pin external example inputs to immutable revisions and make download commands fail on HTTP
-  errors. Dependency updates require changing the pin, regenerating, and reviewing the transcript;
-  unrelated checks must not silently adopt changes from a mutable branch.
-- Timeouts and cancellation always fail, regardless of `expectedExit`. Kill the command process
-  group on cancellation and bound output-pipe waiting so shell children cannot outlive a timed-out
-  command. Cleanup failures must remain errors even when a nonzero exit was expected.
-- Render pre-start commands and captured output in Terminal 1 before its BOE invocation. Its
-  `${WORK_DIR}` display path is relative to the repository root, matching configuration paths.
-  Terminal 2 commands use `.` after their optional fixture-directory `cd`. Generated files must
-  remain available to BOE and later commands for the entire example run.
-- Capture commands and their stdout/stderr in a reproducible transcript. Authors do not maintain
-  a second copy of command text or expected responses.
-- An optional `preStart[].comment` or `commands[].comment` is display text emitted as `#` lines
-  above that command. It is not executed or placeholder-expanded, and its text is compared literally
-  on regeneration.
-- Keep simple configuration readable: an empty object or one top-level scalar setting is rendered
-  as compact JSON. Multiple settings or any nested object or array use pretty-printed, indented
-  JSON in the displayed BOE command.
-- Wrap displayed commands at argument boundaries to fit 80 characters, including continuation
-  markers and indentation. Use backslash-newline continuations outside quotes; preserve indivisible
-  arguments and embedded JSON lines even when they exceed the limit. Never interpret `&&` or `||`
-  inside an argument as shell operators or change argument bytes to shorten a line.
-- Display local commands using BOE's default setup: listener `http://localhost:10000`, admin
-  `http://127.0.0.1:9901`, and the default `httpbin.org` upstream. Expand source placeholders into
-  literal default URLs and configuration values. Do not expose allocated port variables,
-  generator helper commands, or lifecycle scaffolding in the transcript.
-- Show the foreground BOE invocation in one terminal and example commands in a second terminal
-  after Envoy is ready. Keep the intentional Envoy version selection visible. Generation uses
-  the real default upstream so recorded responses correspond to the displayed commands;
-  upstream requests therefore require network access.
-- `update-examples` replaces stale generated bodies. `check-examples` runs the same examples,
-  reports meaningful differences, and exits unsuccessfully on drift without writing manifests.
-- Suppress changes to declared date or duration values only when their format is unchanged,
-  except that millisecond values may change decimal precision, including integer notation.
-  Keep the reviewed transcript when those are the only differences.
-- Ignore ordering between different response header names during comparison. Preserve the order
-  and count of repeated fields, and retain the captured order in generated examples.
-- Optional `elideOutput: true` allows authors to replace incidental captured output lines with
-  standalone `...` markers in `code`. Execute complete commands, compare retained values using
-  existing volatile rules, and ignore only explicitly omitted output. Never elide command failures
-  or recognized HTTP response status lines.
-
-## Current execution boundaries
-
-One example runs one local extension configuration in one BOE instance, with its default upstream.
-`preStart` covers downloads, file creation, and local builds; explicit `sh -c` commands can express
-shell variables, pipelines, and heredocs. It does not extend the BOE invocation or supervise services.
-Existing examples expose these remaining gaps:
-
-- [DNS lookup](../../../extensions/dns-gateway/manifests/lookup/manifest.yaml) starts resolver and
-  lookup together with separate configurations. [Cluster router](../../../extensions/composer/cluster-router/manifest.yaml)
-  uses multiple Envoy peers. These need multi-extension configuration and service orchestration.
-- [Bedrock](../../../extensions/composer/bedrock-guardrails/manifest.yaml),
-  [token exchange](../../../extensions/composer/token-exchange/manifest.yaml), and
-  [OpenFGA](../../../extensions/composer/openfga/manifest.yaml) pass extra clusters to BOE. Decoder
-  examples select an upstream host, and routing examples depend on custom routes. These need a
-  way to configure the primary BOE/bootstrap options.
-- Cloud/API examples contain credential placeholders in configuration. The current placeholder
-  set does not support environment-backed configuration or transcript redaction. Credentials and
-  reachable external APIs are also prerequisites for execution.
-- [SAML](../../../extensions/composer/saml/manifest.yaml) and token exchange start Docker services.
-  Pre-start steps can start containers, but there is no cleanup phase for stopping them after BOE
-  or on failure. Do not migrate these examples until teardown can be guaranteed. Background child
-  processes do not survive command process-group cleanup.
-- SAML examples require browser login and manual inspection, which this command runner cannot
-  replay. DNS interception additionally requires privileged host networking setup.
-- Commands may declare a bounded HTTP-status retry to make a transient response target observable
-  during capture. This retries a command only while it exits as expected and returns a valid HTTP
-  response with another status; command failures, timeouts, cancellation, and unparseable output
-  fail immediately. Only the matching attempt is captured, and exhaustion fails the example before
-  any manifest is written. The displayed comment explains the capture retry, while the copied
-  command itself runs once. Retries do not make probabilistic behavior repeatable: the
-  [dynamic fault injection](../../../extensions/composer/dynamic-fault-injection/manifest.yaml)
-  example captures each randomly sampled status in a separate command. This checks that both cases
-  occur within the bound, not their probability. Status changes must never be normalized away.
-  Its verbose timing headers retain Go's duration formatting. Millisecond decimal precision is
-  ignored during comparison. The added-delay header appears only when the upstream needs more
-  delay; its presence change is drift if retained. The example deliberately elides that conditional
-  header while retaining the response status and the other timing headers.
-- Decoder examples illustrate dynamic metadata in comments. Curl cannot observe those values,
-  and current decoder logs do not expose them. A downstream observer filter or configured metadata
-  access log is needed to generate that output; successful BOE logs are not captured by this tool.
-
-## Transcript format
-
-Generated `examples[].code` contains separate fenced `sh` command blocks and `text` output blocks.
-Command blocks are interleaved with captured output in execution order. The website renders each
-block separately and hides generator metadata comments; the comments remain in the manifest so
-checks can compare stream and byte-format changes. Legacy code-only examples remain plain shell
-snippets. Fences are longer than any backtick sequence in their contents, so command or output text
-cannot close its own block.
-
-For HTTP protocol examples, use curl's `--verbose` with `--user-agent boe-example`. The displayed
-transcript retains curl's `>` request and `<` response lines. The runner removes only curl's `* `
-transport diagnostics and `{ [N bytes data]` / `} [N bytes data]` markers; curl errors and other stderr remain.
-Verbose HTTP response-header comparison begins only after a valid initial request line, its request
-headers, and the request-header terminator. Request text, malformed or partial requests, status
-lines, and response bodies remain literal.
-
-Each captured output fence may be followed by one HTML comment with the stream (`stdout` or
-`stderr`) and optional clauses, in this order: `Line endings`, `Bare CR offsets`, `Trailing
-whitespace`, and `No trailing newline`. The trailing-whitespace clause contains standard Base64
-encoding of a JSON array of zero-based line numbers and their trailing text. Bare carriage return
-offsets preserve the distinction between a CR byte and literal `\r` text. These comments are
-strictly metadata, outside the output fences; the website parser accepts only this form and never
-renders arbitrary code content as HTML. Displayed output uses LF line endings, escapes bare CR
-bytes, and omits trailing spaces and tabs; metadata keeps those differences significant.
-
-## Volatile header comparison
-
-Declare header names without a value type:
-
-```yaml
-volatileHeaders:
-  - x-fault-inserted-latency
-  - x-created-at
-```
-
-Header names must be valid HTTP tokens. Selection is case-insensitive; repeated declarations
-select the same header. Declaration does not remove the header or accept arbitrary changes.
-
-For each selected response-header value, independently try a validated date, then a validated
-duration. Dates include supported HTTP date formats and RFC3339. Durations include bare numbers
-and supported duration units. A numeric count or ID therefore becomes volatile if its header
-is listed; authors must opt in only when changing magnitudes should be ignored.
-
-The HTTP `Date` header is automatic and always uses date recognition, even when explicitly
-listed. A malformed numeric `Date` value must not become a duration.
-
-Header recognition starts only when the captured block begins with an HTTP status line or a
-complete verbose request followed immediately by a response status line. It
-can pass through immediate interim `100`, `102`, or `103` responses, then stops permanently
-at the final response's header/body separator. A `101` upgrade is final for this purpose.
-Preambles, later final responses, and HTTP-looking text inside a body remain literal; use
-separate commands or explicit comparison rules when such output needs scoped normalization.
-
-Comparison invariants:
-
-- Both recognized values must have the same inferred kind and format signature. Switching
-  between date and duration, or between a recognized and unrecognized value, produces drift.
-- Unrecognized or invalid values compare exactly. Inference never makes arbitrary strings
-  interchangeable.
-- Magnitudes and calendar values can change. Decimal precision and integer-versus-decimal
-  notation are ignored for `ms` components, including in compound durations. Units, spacing,
-  signs, leading decimal points, zero padding, date layout, timezone notation, and fractional
-  precision in other units and dates remain significant. Bare numbers retain their precision.
-- Compare complete response header sections independently, including interim responses. Ordering
-  between different names is insignificant; names are grouped case-insensitively, preserving the
-  order of repeated fields. Header spelling, casing, separators, presence, and occurrence count
-  remain significant. Requests, bodies, preambles, and incomplete or malformed sections remain literal.
-- Whitespace and line-ending metadata move with their header during comparison. Preserve metadata
-  encoding and byte-format changes; malformed metadata prevents order normalization. Custom rules
-  match original output before header reordering, so comparison cannot create new pattern matches.
-- Header rules apply only inside captured HTTP response header sections. They never normalize
-  configuration, commands, HTTP status, response body text, or other headers.
-- Custom `comparison` rules retain their explicit `type` and exactly one named `value` capture.
-  They match captured response text, not generated shell commands or output metadata.
-- Generated output retains observed values; inference affects comparison only. Line-ending style,
-  bare carriage returns, trailing whitespace, and the presence of a final newline remain significant.
-
-## Output elision
-
-Set `elideOutput: true` on an executable example, generate its complete transcript, then replace
-incidental lines inside its fenced `text` output with standalone `...` lines. Run `update-examples`
-once after editing so the generator refreshes byte-format metadata for the retained excerpt.
-There is no second expected-output template. Without the opt-in, all dots remain literal.
-
-The whole-line semantics follow Istio's
-[`_verify_elided`](https://github.com/istio/istio.io/blob/master/tests/README.md#verify-functions):
-each marker matches one or more complete lines, including blank lines. Markers can appear at the
-start, middle, or end; consecutive markers each require at least one line. Inline or indented dots
-remain literal. Matching is anchored to the entire output block, independently for each stream.
-
-For example, this output keeps the response status, a timing header, and the relevant body fields:
-
-```text
-HTTP/1.1 200 OK
-X-Latency: 12.3ms
-...
-
-first
-...
-last
-```
-
-Declare `X-Latency` in `volatileHeaders` to accept changing magnitudes and millisecond precision,
-while still detecting a different unit or invalid value. Custom date/duration comparison rules
-also work with elision. Recognition uses the complete fresh capture before selecting lines, so
-omitting framing never promotes HTTP-looking body text into headers. Keep header terminators
-when selecting individual headers to retain comparison independent of field order. Repeated
-retained fields keep their relative order; elided headers may be added, removed, or changed provided
-each marker still omits at least one line. Recognized HTTP status lines must remain in the excerpt.
-
-Omitted output is deliberately outside the example's verification scope, including its format.
-Retained lines still preserve line endings, trailing whitespace, bare carriage returns, and final
-newline state. Metadata describes only the retained excerpt and synthetic LF-terminated markers.
-Equivalent generation preserves the reviewed transcript and observed values. A mismatch in a
-retained line expands that output block to the complete actual capture for review; generation does
-not guess which changed lines to hide. Other matching excerpts remain compact. Format-only changes
-in retained byte metadata refresh that excerpt without expanding it.
-
-Commands, comments, configurations, fences, stream boundaries, exit-code checks, retry status
-selection, timeouts, and cleanup retain their existing behavior. Elision neither retries arbitrary
-mismatches nor accepts a failed command. The check target never writes, including when metadata
-needs refreshing after an author edits an excerpt.
+- Executable examples require a `config` object and ordered `commands[].argv`. `{}` is valid;
+  missing or `null` configuration is not. `code` may be absent before generation. Existing
+  code-only examples remain valid.
+- `argv` preserves argument boundaries and runs without implicit shell evaluation. Explicit
+  `sh -c` commands can use variables, pipelines, and heredocs.
+- `preStart` accepts the same command fields and prepares files needed by BOE. Commands in either
+  phase must finish; background children cannot provide persistent companion services.
+- Pin external inputs to immutable revisions and fail downloads on HTTP errors. Updating a pin
+  requires regenerating and reviewing its transcript.
 
 ## Execution and update invariants
 
-- Argument boundaries are preserved and commands run without implicit shell evaluation.
-  `expectedExit` defaults to zero. A launch failure, signal, timeout, or unexpected exit fails
-  generation; an HTTP denial succeeds when the command itself returns its expected exit code.
-- An optional `retry` on `commands[]` or `preStart[]` contains `httpStatus` (200–599) and
-  `maxAttempts` (1–10000). It repeats the same argv and working directory within the command's
-  total timeout. Only a valid HTTP status mismatch is retried; an unexpected exit, timeout,
-  cancellation, or response that cannot be parsed fails immediately. Only the selected attempt's
-  output is captured. Exhaustion fails the run atomically. Generated comments describe this
-  capture-only retry; copied commands do not contain a retry loop.
-- Retry commands invoke `curl` directly with `--disable` (or `-q`) first so user curl configuration
-  cannot change the capture. Select a declared capture mode: `--verbose` parses
-  only its framed stderr exchange, `--include` parses only the initial stdout response, or
-  `--write-out` starts with `HTTP/%{http_version} %{http_code}` and a newline while `--output /dev/null`
-  diverts the body. Header-style write-out output must terminate with a blank line. Mixed capture
-  modes must agree. HTTP-shaped body text cannot select a status. Retries require one HTTP(S) URL;
-  redirects, curl-owned retries, multiple transfers, config files, and unsupported curl options fail
-  before execution. URL globbing requires `--globoff`; HTTPS include capture requires
-  `--suppress-connect-headers` to exclude proxy CONNECT headers.
-- Only `${PROXY_URL}`, `${ADMIN_URL}`, `${UPSTREAM_ADDRESS}`, and `${WORK_DIR}` are expanded in
-  authored configuration and arguments. Unknown placeholders fail explicitly. Execution uses
-  allocated listener/admin addresses privately; display uses the literal defaults. The upstream
-  address placeholder is `httpbin.org:443`. Captured output receives the same address mapping.
-- Commands run in a temporary working directory populated with the contents of the selected
-  extension's `examples/` directory. Fixture symlinks are rejected. BOE configuration, extension
-  cache, and runtime state are isolated from the user's installed state; the Envoy binary download
-  cache can be reused across invocations.
-- For fixtures, terminal two enters the extension's repository-relative `examples/` directory.
-  Configuration resolves the working-directory placeholder relative to the repository root;
-  command arguments resolve it to `.` in that fixture directory. No temporary directory setup
-  or exported working-directory variable is shown. Without fixtures, displayed commands use
-  the current directory.
-- Startup and commands are bounded by timeouts. Clean up BOE, command process groups, and
-  temporary directories on success or failure. Lifecycle management remains internal to the tool.
-- Execute and validate every selected example before writing any manifest. A failed example
-  must not leave earlier examples partially refreshed.
-- Preserve YAML outside generated `code` fields, including comments and unrelated examples.
-  Refuse flow-style example entries rather than silently reformatting them.
-- End generated code with exactly one newline, matching YAML's literal scalar clipping.
-  Serialization must not introduce drift that prevents volatile-value comparison.
-- Validate the patched manifest, reject concurrent manifest edits detected before staging, and
-  stage all changes before replacing targets. Preserve file permissions. Replacements are
-  atomic per file; the batch is not a filesystem transaction.
+- Compile comparison policies during input validation, before starting BOE, and reuse them during
+  reconciliation. Invalid rules must fail even if the existing transcript would compare equal.
+- Copy the extension's `examples/` contents into an isolated temporary working directory. Reject
+  symlinks and non-regular fixture files. Isolate BOE configuration, extension cache, and runtime
+  state from the user's installation; the Envoy binary cache may be reused.
+- Run `preStart` sequentially after fixture staging. Start BOE with `--local` against the checkout,
+  wait for Envoy readiness, then run `commands` sequentially in the same working directory.
+  A pre-start failure prevents BOE startup.
+- Expand only `${PROXY_URL}`, `${ADMIN_URL}`, `${UPSTREAM_ADDRESS}`, and `${WORK_DIR}` in
+  configuration strings and arguments; reject unknown names. Use allocated proxy/admin addresses
+  for execution and map them to display addresses in commands and captured output. The upstream
+  address is `httpbin.org:443`; forwarded requests require network access.
+- Require the command's exit code to equal `expectedExit`, defaulting to zero. Launch failures,
+  signals, timeouts, cancellation, and cleanup failures always fail, regardless of the expected exit. An HTTP denial succeeds
+  if the command returns its expected exit code.
+- Bound startup and command duration. Clean up BOE, command process groups, and temporary
+  directories on success or failure. Bound output-pipe waiting so shell children cannot keep a
+  canceled command alive.
+- Execute all selected examples and validate patched manifests before writing any manifest.
+  `check-examples` reports drift without writing. Equivalent runs preserve the reviewed transcript.
+- Preserve YAML outside generated `code`, including comments and unrelated examples. Reject
+  flow-style example entries. End generated code with one newline to match YAML scalar clipping.
+- Reject concurrent manifest edits before staging. Stage all changes before replacing targets
+  and preserve file permissions. Replacement is atomic per file; a replacement failure may leave
+  earlier files updated.
+
+## HTTP-status retries
+
+`commands[]` and `preStart[]` may declare `retry` with `httpStatus` (200–599) and `maxAttempts`
+(1–10000). Repeat the same arguments and working directory within one total command timeout.
+Retry only a valid HTTP status mismatch; an unexpected exit, timeout, cancellation, or unparseable
+response fails immediately. Record only the selected attempt. Exhaustion fails before writes.
+
+Require direct curl invocation, `--disable` or `-q` first, one HTTP(S) URL, and a declared capture
+mode:
+
+- `--verbose`: parse the framed stderr exchange.
+- `--include`: parse the initial stdout response. HTTPS requires `--suppress-connect-headers`
+  to exclude proxy CONNECT headers.
+- `--write-out`: require a template starting with `HTTP/%{http_version} %{http_code}` and a newline,
+  followed by any header lines and a blank line. Require `--output /dev/null` to divert the body.
+
+Mixed modes must agree. HTTP-shaped body text cannot select a status. Reject redirects,
+curl-owned retries, multiple transfers, config files, and unsupported options before execution.
+URL globbing requires `--globoff`.
+
+The generated comment states the retry target and bound; the displayed command runs once.
+The [fault-injection example](../../../extensions/composer/dynamic-fault-injection/manifest.yaml)
+captures each sampled status in a separate command. This verifies occurrence within the bound,
+not the configured probability.
+
+## Transcript format
+
+- Display `boe run --extension` with the manifest's published name. The displayed command may differ
+  from a released extension's behavior until the checkout's changes are released.
+- Use default display addresses: proxy `http://localhost:10000`, admin `http://127.0.0.1:9901`,
+  and upstream `httpbin.org:443`. Keep the selected Envoy version visible; omit allocated port
+  variables, generator helpers, and lifecycle scaffolding.
+- Show pre-start commands and output before the foreground BOE invocation in Terminal 1.
+  Require the repository root only when referencing staged fixtures. Configuration and pre-start
+  `${WORK_DIR}` paths are repository-relative; Terminal 2 enters `examples/` when present and uses
+  `.` for command `${WORK_DIR}` paths. Generated files remain available throughout execution.
+- Render `comment` as literal `#` lines above its command, without execution or placeholder
+  expansion. Empty configuration or one scalar setting uses compact JSON; multiple settings,
+  nested objects, and arrays use indented JSON.
+- Wrap shell commands at argument boundaries within 80 columns, including indentation and
+  continuation markers. Preserve indivisible arguments and JSON lines that exceed the limit.
+  Do not interpret `&&` or `||` inside arguments or alter argument bytes to shorten lines.
+- Use fenced `sh` command blocks and separate `text` stdout/stderr captures. Fences exceed every
+  backtick sequence in their contents. Legacy code-only examples render as one shell block.
+- Retain verbose curl's `>` request and `<` response lines. Remove only `* ` transport diagnostics
+  and `{ [N bytes data]` / `} [N bytes data]` markers; preserve errors and other stderr.
+
+Output metadata is one HTML comment after its fence, containing `stdout` or `stderr` and optional
+clauses in this order: `Line endings`, `Bare CR offsets`, `Trailing whitespace`, `No trailing
+newline`. Trailing whitespace is Base64-encoded JSON with zero-based line numbers and text.
+Bare CR offsets distinguish carriage-return bytes from literal `\r` text. Display uses LF, escapes
+bare CR, and strips trailing spaces and tabs; metadata keeps these byte distinctions significant.
+The website hides only recognized metadata and never renders arbitrary code as HTML.
+
+One codec owns encoding, restoration, and round-trip validation. Header reordering and elision
+consume its structured body and metadata; Markdown rendering is a separate operation.
+
+## Volatile header comparison
+
+`volatileHeaders` contains case-insensitive HTTP field names; duplicate declarations select the
+same field. For each selected value, try a validated date, then a duration. Dates include HTTP
+date formats and RFC3339; durations include bare numbers and supported units. Numeric IDs and
+counts therefore become volatile if their headers are listed. HTTP `Date` is selected
+automatically and uses date recognition only, including when listed explicitly.
+
+HTTP analysis begins at an initial status line or a complete verbose request immediately followed
+by a response status. It follows interim `100`, `102`, and `103` sections and stops at the final
+response. A `101` upgrade is final. Preambles, malformed or partial requests, and HTTP-looking
+body text do not establish header context. Header normalization requires complete sections.
+
+- Compare recognized values by kind and format. Magnitudes and calendar values may change;
+  invalid or unrecognized values compare exactly. Switching kind or recognition state is drift.
+- Ignore decimal precision and integer-versus-decimal notation for `ms` components, including
+  compound durations. Preserve units, spacing, signs, leading decimal points, zero padding,
+  date layout, timezone notation, and fractional precision in dates, other units, and bare numbers.
+- Compare each complete header section independently. Ignore ordering between different names;
+  group names case-insensitively while preserving repeated-field order. Header spelling, casing,
+  separators, presence, and occurrence count remain significant.
+- Move byte metadata with reordered headers; malformed metadata prevents order normalization.
+  Apply header value rules only within recognized response sections.
+- Custom `comparison` rules require `type: date` or `duration` and exactly one named `value`
+  capture. Match original captured output before reordering, never commands or metadata. Both
+  compared values must satisfy the rule in full context; fresh capture spans alone are insufficient.
+  Coalesce compatible captures of the same span and leave conflicting overlaps literal.
+- Status changes must never be normalized away. Reject custom captures intersecting recognized
+  HTTP status lines, including interim responses and statuses with incomplete headers. This
+  restriction does not apply to HTTP-shaped body text.
+
+## Output elision
+
+With `elideOutput: true`, standalone `...` lines in fenced `text` output match one or more complete
+lines, including blank lines. The whole-line rule follows Istio's
+[`_verify_elided`](https://github.com/istio/istio.io/blob/master/tests/README.md#verify-functions).
+Matching is anchored to each output block, independently per stream. Leading, trailing, and
+consecutive markers are allowed; each consumes at least one line. Inline or indented dots, and
+all dots without the opt-in, remain literal.
+
+Apply elision after successful execution and retry selection. Analyze the complete fresh capture
+before selecting retained lines so omitted framing cannot promote body text into HTTP headers.
+Record recognized status positions before validating their headers: malformed or truncated
+headers must not allow a status to be hidden. Retained values use the same comparison rules.
+
+Keep header terminators to compare retained headers independently of order. Repeated retained
+fields preserve their relative order; omitted headers may change, appear, or disappear if each
+marker still consumes a line. The fault-injection example uses this to omit its conditional
+added-delay header while retaining other timings and statuses.
+
+Omitted content and formatting are unchecked. Metadata describes only retained lines and
+synthetic LF-terminated markers; refresh it after authors edit an excerpt. A retained content
+mismatch expands that output block to the full capture for review, leaving matching excerpts
+compact. Changes only to retained byte metadata refresh the excerpt without expansion.
+
+## Current execution boundaries
+
+Each example runs one extension configuration in one BOE instance with the default upstream.
+The runner has no additional bootstrap options, service supervision, teardown phase, credential
+expansion/redaction, browser interaction, or privileged host-network setup. These gaps prevent
+migration of examples requiring:
+
+- Multiple configurations or peers:
+  [DNS lookup](../../../extensions/dns-gateway/manifests/lookup/manifest.yaml) and
+  [cluster router](../../../extensions/composer/cluster-router/manifest.yaml).
+- Extra clusters, upstream selection, or routes:
+  [Bedrock](../../../extensions/composer/bedrock-guardrails/manifest.yaml),
+  [token exchange](../../../extensions/composer/token-exchange/manifest.yaml),
+  [OpenFGA](../../../extensions/composer/openfga/manifest.yaml), and decoder/routing examples.
+- Credential substitution for external cloud/API calls.
+- Docker services or login flows: [SAML](../../../extensions/composer/saml/manifest.yaml) and token
+  exchange. Pre-start commands could launch containers but cannot guarantee their cleanup.
+- Privileged networking for DNS interception.
+- Dynamic-metadata inspection in decoder examples. Curl cannot observe it, decoder logs do not
+  expose it, and BOE's successful-run logs are not captured. An observer filter or metadata access
+  log is needed.
 
 ## Verification
 
-Tests must prove observable comparison boundaries, check-mode non-mutation, value-only
-preservation, format-change drift, and failure before writes. Run process and loopback tests
-with sufficient permissions and uncached results so skipped tests cannot masquerade as
-executed integration checks. Validate the pilot examples against the pinned Envoy version,
-then confirm repeated generation leaves the manifests unchanged.
+Tests must prove comparison boundaries, check-mode non-mutation, equivalent-value preservation,
+format-change drift, and failure before writes. Run process and loopback tests uncached with the
+required permissions. Validate pilot examples against the pinned Envoy version, then confirm
+repeated generation leaves manifests unchanged.

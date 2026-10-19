@@ -7,6 +7,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -348,6 +349,118 @@ func TestEquivalentTranscriptRejectsInvalidRules(t *testing.T) {
 	}
 }
 
+func TestComparisonPreservesRecognizedHTTPStatuses(t *testing.T) {
+	rules := []extensions.ExampleComparisonRule{{Type: durationRuleType, Pattern: `HTTP/[0-9.]+ (?P<value>[0-9]{3})`}}
+	for _, mode := range []string{"include", "verbose", "legacy"} {
+		for _, elide := range []bool{false, true} {
+			if mode == "legacy" && elide {
+				continue
+			}
+			for _, tc := range []struct {
+				name, previous, fresh string
+				equal                 bool
+			}{
+				{
+					name:     "final status",
+					previous: "HTTP/2 200\nX-Test: stable\n\nbody\n",
+					fresh:    "HTTP/2 503\nX-Test: stable\n\nbody\n",
+				},
+				{
+					name:     "interim status",
+					previous: "HTTP/1.1 103 Informational\n\nHTTP/2 200\nX-Test: stable\n\nbody\n",
+					fresh:    "HTTP/1.1 102 Informational\n\nHTTP/2 200\nX-Test: stable\n\nbody\n",
+				},
+				{
+					name:     "truncated final headers",
+					previous: "HTTP/1.1 103 Early Hints\n\nHTTP/2 200\nX-Test: stable\n",
+					fresh:    "HTTP/1.1 103 Early Hints\n\nHTTP/2 503\nX-Test: stable\n",
+				},
+				{
+					name:     "HTTP-shaped body follows custom rules",
+					previous: "HTTP/2 200\nX-Test: stable\n\nHTTP/2 200\n",
+					fresh:    "HTTP/2 200\nX-Test: stable\n\nHTTP/2 503\n",
+					equal:    true,
+				},
+			} {
+				name := mode + "/" + tc.name
+				if elide {
+					name += "/elided"
+				}
+				t.Run(name, func(t *testing.T) {
+					old := headerOrderTranscript(t, mode, tc.previous)
+					fresh := headerOrderTranscript(t, mode, tc.fresh)
+					if elide {
+						header := "X-Test: stable\n"
+						if mode == "verbose" {
+							header = "< " + header
+						}
+						old = strings.Replace(old, header, "...\n", 1)
+					}
+					policy, err := compileComparisonPolicy(rules, nil)
+					require.NoError(t, err)
+					result := policy.reconcile(old, fresh, elide)
+					if tc.equal {
+						require.Equal(t, old, result)
+					} else {
+						require.Equal(t, fresh, result)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestComparisonOverlappingCaptureGroups(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		patterns []string
+		equal    bool
+	}{
+		{
+			name: "nested conflicts",
+			patterns: []string{
+				`(?m)^(?P<value>[0-9]+ms)`,
+				`(?m)^[0-9](?P<value>[0-9])`,
+				`(?m)^[0-9]{3}(?P<value>[0-9])`,
+			},
+		},
+		{
+			name: "compatible identical spans",
+			patterns: []string{
+				`(?m)^(?P<value>[0-9]+ms)`,
+				`(?m)(?P<value>[0-9]+ms)$`,
+			},
+			equal: true,
+		},
+	} {
+		for _, elide := range []bool{false, true} {
+			name := tc.name
+			if elide {
+				name += "/elided"
+			}
+			t.Run(name, func(t *testing.T) {
+				old := renderOutputForTest(t, "ignored\n123456ms\n", nil, nil, "stdout")
+				fresh := renderOutputForTest(t, "ignored\n123956ms\n", nil, nil, "stdout")
+				if elide {
+					old = strings.Replace(old, "ignored\n", "...\n", 1)
+				}
+				rules := make([]extensions.ExampleComparisonRule, len(tc.patterns))
+				for index, pattern := range tc.patterns {
+					rules[index] = extensions.ExampleComparisonRule{Type: durationRuleType, Pattern: pattern}
+				}
+				policy, err := compileComparisonPolicy(rules, nil)
+				require.NoError(t, err)
+				result := policy.reconcile(old, fresh, elide)
+				if tc.equal {
+					require.Equal(t, old, result)
+				} else {
+					require.Equal(t, fresh, result)
+				}
+			})
+		}
+	}
+}
+
 func renderedOutput(body string) string {
 	return "# Output:\n" + body + "# End output\n"
 }
@@ -358,4 +471,12 @@ func renderedStderr(body string) string {
 
 func fencedText(body, metadata, fence string) string {
 	return fence + "text\n" + body + fence + "\n" + metadata
+}
+
+func equivalentTranscript(old, current string, rules []extensions.ExampleComparisonRule, headers []string) (bool, error) {
+	policy, err := compileComparisonPolicy(rules, headers)
+	if err != nil {
+		return false, err
+	}
+	return policy.reconcile(old, current, false) == old, nil
 }

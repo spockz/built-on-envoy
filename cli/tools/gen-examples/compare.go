@@ -25,14 +25,11 @@ const (
 )
 
 var (
-	rawHeaderPattern    = regexp.MustCompile(`^([^:\r\n]+)([ \t]*:[ \t]*)([^\r\n]*)(\r?)(?:\n)?$`)
-	rawStatusPattern    = regexp.MustCompile(`^HTTP/[0-9.]+[ \t]+([0-9]{3})(?:[ \t]|\r?$)`)
-	requestStartPattern = regexp.MustCompile(`^> [A-Z]+ [^\r\n]* HTTP/[0-9.]+\r?(?:\n)?$`)
-	rfc3339Pattern      = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})(T)(\d{2}):(\d{2}):(\d{2})(\.(\d+))?(Z|[+-]\d{2}:\d{2})$`)
-	rfc1123Pattern      = regexp.MustCompile(`^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
-	rfc850Pattern       = regexp.MustCompile(`^[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
-	asctimePattern      = regexp.MustCompile(`^[A-Za-z]{3} [A-Za-z]{3} ( {1,2})(\d{1,2}) \d{2}:\d{2}:\d{2} \d{4}$`)
-	durationPart        = regexp.MustCompile(`(?:\d+(?:\.\d+)?|\.\d+)([ \t]*)(ns|us|µs|ms|s|m|h)`)
+	rfc3339Pattern = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})(T)(\d{2}):(\d{2}):(\d{2})(\.(\d+))?(Z|[+-]\d{2}:\d{2})$`)
+	rfc1123Pattern = regexp.MustCompile(`^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
+	rfc850Pattern  = regexp.MustCompile(`^[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} ([A-Za-z]{3})$`)
+	asctimePattern = regexp.MustCompile(`^[A-Za-z]{3} [A-Za-z]{3} ( {1,2})(\d{1,2}) \d{2}:\d{2}:\d{2} \d{4}$`)
+	durationPart   = regexp.MustCompile(`(?:\d+(?:\.\d+)?|\.\d+)([ \t]*)(ns|us|µs|ms|s|m|h)`)
 )
 
 type comparisonRule struct {
@@ -91,38 +88,80 @@ type capture struct {
 	value normalizedValue
 }
 
-// equivalentTranscript compares unmodified rendering outside output blocks.
-func equivalentTranscript(old, current string, rules []extensions.ExampleComparisonRule, headers []string) (bool, error) {
-	comparisonRules, err := compileComparisonRules(rules)
-	if err != nil {
-		return false, err
-	}
+type comparisonPolicy struct {
+	rules   []comparisonRule
+	headers map[string]struct{}
+}
 
+type preparedOutput struct {
+	block      outputBlock
+	http       httpOutput
+	captures   []capture
+	normalized normalizedOutput
+}
+
+func compileComparisonPolicy(rules []extensions.ExampleComparisonRule, headers []string) (comparisonPolicy, error) {
+	compiled, err := compileComparisonRules(rules)
+	if err != nil {
+		return comparisonPolicy{}, err
+	}
 	headerRules, err := compileHeaderRules(headers)
 	if err != nil {
-		return false, err
+		return comparisonPolicy{}, err
 	}
+	return comparisonPolicy{rules: compiled, headers: headerRules}, nil
+}
 
-	oldParts := splitTranscript(old)
-	newParts := splitTranscript(current)
+func (policy comparisonPolicy) prepare(block outputBlock) *preparedOutput {
+	analysis := analyzeHTTPOutput(block)
+	captures := outputCaptures(block, analysis, policy.rules, policy.headers)
+	canonical, remapped := canonicalHeaderOrder(block, analysis, captures)
+	normalized := normalizedOutput{
+		segments: normalizeSegments(canonical.body, nonOverlappingCaptures(remapped)),
+		metadata: canonical.metadata,
+	}
+	return &preparedOutput{block: block, http: analysis, captures: captures, normalized: normalized}
+}
+
+func (policy comparisonPolicy) reconcile(old, current string, elide bool) string {
+	oldParts, newParts := splitTranscript(old), splitTranscript(current)
 	if len(oldParts) != len(newParts) {
-		return false, nil
+		return current
 	}
-
-	for index := range oldParts {
-		oldPart, newPart := oldParts[index], newParts[index]
+	var projected strings.Builder
+	cursor := 0
+	equal := true
+	for index, oldPart := range oldParts {
+		newPart := newParts[index]
 		if oldPart.block == nil || newPart.block == nil {
 			if oldPart.block != nil || newPart.block != nil || oldPart.literal != newPart.literal {
-				return false, nil
+				return current
 			}
 			continue
 		}
-		if oldPart.block.kind != newPart.block.kind || oldPart.block.raw != newPart.block.raw || !equivalentOutputBlock(*oldPart.block, *newPart.block, comparisonRules, headerRules) {
-			return false, nil
+		previous, fresh := *oldPart.block, *newPart.block
+		if previous.kind != fresh.kind || previous.raw != fresh.raw {
+			return current
 		}
+		if !elide || !previous.raw || !hasElision(previous.body) {
+			equal = equivalentNormalizedOutput(policy.prepare(previous).normalized, policy.prepare(fresh).normalized) && equal
+			continue
+		}
+		replacement, matched := policy.projectElidedOutput(previous, fresh)
+		if !matched {
+			equal = false
+			continue
+		}
+		projected.WriteString(current[cursor:fresh.start])
+		projected.WriteString(replacement.markdown())
+		cursor = fresh.end
+		equal = previous.metadata == replacement.metadata && equal
 	}
-
-	return true, nil
+	if equal {
+		return old
+	}
+	projected.WriteString(current[cursor:])
+	return projected.String()
 }
 
 func compileComparisonRules(rules []extensions.ExampleComparisonRule) ([]comparisonRule, error) {
@@ -307,36 +346,28 @@ func outputBlockStart(line string) (kind, endMarker string, found bool) {
 	}
 }
 
-func equivalentOutputBlock(old, current outputBlock, rules []comparisonRule, headers map[string]struct{}) bool {
-	oldOutput := normalizeOutputBlock(old, rules, headers)
-	newOutput := normalizeOutputBlock(current, rules, headers)
-	if oldOutput.metadata != newOutput.metadata {
+func equivalentNormalizedOutput(old, current normalizedOutput) bool {
+	return old.metadata == current.metadata && equivalentSegments(old.segments, current.segments)
+}
+
+func equivalentSegments(old, current []bodySegment) bool {
+	if len(old) != len(current) {
 		return false
 	}
-	oldSegments, newSegments := oldOutput.segments, newOutput.segments
-	if len(oldSegments) != len(newSegments) {
-		return false
-	}
-	for index := range oldSegments {
-		oldSegment, newSegment := oldSegments[index], newSegments[index]
-		if oldSegment.value == nil || newSegment.value == nil {
-			if oldSegment.value != nil || newSegment.value != nil || oldSegment.literal != newSegment.literal {
+	for index, previous := range old {
+		fresh := current[index]
+		if previous.value == nil || fresh.value == nil {
+			if previous.value != nil || fresh.value != nil || previous.literal != fresh.literal {
 				return false
 			}
-			continue
-		}
-		if !equivalentNormalizedValue(*oldSegment.value, *newSegment.value) {
+		} else if !equivalentNormalizedValue(*previous.value, *fresh.value) {
 			return false
 		}
 	}
 	return true
 }
 
-func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map[string]struct{}) normalizedOutput {
-	captures := outputCaptures(block, rules, headers)
-	block, captures = canonicalHeaderOrder(block, captures)
-	body := block.body
-	captures = nonOverlappingCaptures(captures)
+func normalizeSegments(body string, captures []capture) []bodySegment {
 	segments := make([]bodySegment, 0, len(captures)*2+1)
 	start := 0
 	for _, capture := range captures {
@@ -350,12 +381,12 @@ func normalizeOutputBlock(block outputBlock, rules []comparisonRule, headers map
 	if start < len(body) || len(segments) == 0 {
 		segments = append(segments, bodySegment{literal: body[start:]})
 	}
-	return normalizedOutput{segments: segments, metadata: block.metadata}
+	return segments
 }
 
-func outputCaptures(block outputBlock, rules []comparisonRule, headers map[string]struct{}) []capture {
+func outputCaptures(block outputBlock, analysis httpOutput, rules []comparisonRule, headers map[string]struct{}) []capture {
 	body := block.body
-	captures := headerCaptures(block, headers)
+	captures := headerCaptures(block, analysis, headers)
 	raw, positions := rawOutput(block)
 	for _, rule := range rules {
 		for _, match := range rule.pattern.FindAllStringSubmatchIndex(raw, -1) {
@@ -368,7 +399,7 @@ func outputCaptures(block outputBlock, rules []comparisonRule, headers map[strin
 				continue
 			}
 			value, ok := normalizeValue(rule.typeName, raw[start:end])
-			if ok {
+			if ok && !analysis.intersectsStatus(bodyStart, bodyEnd) {
 				captures = append(captures, capture{start: bodyStart, end: bodyEnd, value: value})
 			}
 		}
@@ -441,148 +472,24 @@ func outputMetadataLine(line string) bool {
 	return true
 }
 
-func headerCaptures(block outputBlock, headers map[string]struct{}) []capture {
+func headerCaptures(block outputBlock, analysis httpOutput, headers map[string]struct{}) []capture {
 	captures := make([]capture, 0)
-	for _, section := range responseHeaderSections(block) {
+	for _, section := range analysis.sections {
 		for _, header := range section.headers {
-			if _, found := headers[header.name]; !found {
-				continue
-			}
-			value, valid := inferHeaderValue(header.name, block.body[header.valueStart:header.valueEnd])
-			if valid {
-				captures = append(captures, capture{start: header.valueStart, end: header.valueEnd, value: value})
+			if value, valid := headerValueCapture(block.body, header, headers); valid {
+				captures = append(captures, value)
 			}
 		}
 	}
 	return captures
 }
 
-type responseHeader struct {
-	name       string
-	line       int
-	valueStart int
-	valueEnd   int
-}
-
-type responseHeaderSection struct {
-	headers    []responseHeader
-	statusLine int
-}
-
-func nextPayloadLine(lines []transcriptLine, index int) int {
-	for index < len(lines) && outputMetadataLine(lines[index].text) {
-		index++
+func headerValueCapture(body string, header responseHeader, headers map[string]struct{}) (capture, bool) {
+	if _, found := headers[header.name]; !found {
+		return capture{}, false
 	}
-	return index
-}
-
-func responseHeaderStart(block outputBlock, lines []transcriptLine) (int, string, bool) {
-	if len(lines) == 0 {
-		return 0, "", false
-	}
-	if !block.raw {
-		index := nextPayloadLine(lines, 0)
-		if index < len(lines) {
-			status, ok := responseLine(lines[index], "# ")
-			if ok && rawStatusPattern.MatchString(status) {
-				return index, "# ", true
-			}
-		}
-		return 0, "", false
-	}
-	if rawStatusPattern.MatchString(lines[0].text) {
-		return 0, "", true
-	}
-	if !requestStartPattern.MatchString(lines[0].text) {
-		return 0, "", false
-	}
-	index := 1
-	for index < len(lines) {
-		line := lines[index].text
-		if line == ">\n" || line == "> \n" {
-			index++
-			break
-		}
-		if !strings.HasPrefix(line, "> ") {
-			return 0, "", false
-		}
-		match := rawHeaderPattern.FindStringSubmatchIndex(line[2:])
-		if match == nil || !validHeaderName(strings.ToLower(line[2+match[2]:2+match[3]])) {
-			return 0, "", false
-		}
-		index++
-	}
-	if index >= len(lines) || !strings.HasPrefix(lines[index].text, "< ") || !rawStatusPattern.MatchString(lines[index].text[2:]) {
-		return 0, "", false
-	}
-	return index, "< ", true
-}
-
-func responseHeaderSections(block outputBlock) []responseHeaderSection {
-	lines := transcriptLines(block.body)
-	index, prefix, found := responseHeaderStart(block, lines)
-	if !found {
-		return nil
-	}
-	sections := make([]responseHeaderSection, 0)
-	for index < len(lines) {
-		status, ok := responseLine(lines[index], prefix)
-		if !ok {
-			return sections
-		}
-		statusMatch := rawStatusPattern.FindStringSubmatch(status)
-		if statusMatch == nil {
-			return sections
-		}
-		statusCode := statusMatch[1]
-		section := responseHeaderSection{statusLine: index}
-		index++
-		complete := false
-		for index < len(lines) {
-			text, ok := responseLine(lines[index], prefix)
-			if !ok {
-				return sections
-			}
-			if text == "\n" || text == "\r\n" || text == "" {
-				index++
-				complete = true
-				break
-			}
-			match := rawHeaderPattern.FindStringSubmatchIndex(text)
-			if match == nil {
-				return sections
-			}
-			nameStart, nameEnd := match[2], match[3]
-			name := strings.ToLower(text[nameStart:nameEnd])
-			if !validHeaderName(name) {
-				return sections
-			}
-			section.headers = append(section.headers, responseHeader{
-				name: name, line: index,
-				valueStart: lines[index].offset + len(prefix) + match[6],
-				valueEnd:   lines[index].offset + len(prefix) + match[7],
-			})
-			index++
-		}
-		if !complete {
-			return sections
-		}
-		sections = append(sections, section)
-		if statusCode != "100" && statusCode != "102" && statusCode != "103" {
-			return sections
-		}
-	}
-	return sections
-}
-
-func responseLine(line transcriptLine, prefix string) (string, bool) {
-	if (prefix == "# " && line.text == "#\n") || (prefix == "< " && line.text == "<\n") {
-		return "\n", true
-	}
-	if !strings.HasPrefix(line.text, prefix) {
-		return "", false
-	}
-	return line.text[len(prefix):], true
+	value, valid := inferHeaderValue(header.name, body[header.valueStart:header.valueEnd])
+	return capture{start: header.valueStart, end: header.valueEnd, value: value}, valid
 }
 
 func inferHeaderValue(name, value string) (normalizedValue, bool) {
@@ -630,7 +537,9 @@ func nonOverlappingCaptures(captures []capture) []capture {
 	selected := make([]capture, 0, len(captures))
 	for index := 0; index < len(captures); {
 		groupEnd := index + 1
-		for groupEnd < len(captures) && captures[groupEnd].start < captures[groupEnd-1].end {
+		end := captures[index].end
+		for groupEnd < len(captures) && captures[groupEnd].start < end {
+			end = max(end, captures[groupEnd].end)
 			groupEnd++
 		}
 		if groupEnd == index+1 {

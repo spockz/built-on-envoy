@@ -6,64 +6,7 @@
 // Output elision belongs beside comparison so omitted lines cannot weaken execution or retained-value checks.
 package main
 
-import (
-	"strings"
-
-	"github.com/tetratelabs/built-on-envoy/cli/internal/extensions"
-)
-
-func reconcileElidedTranscript(old, current string, rules []extensions.ExampleComparisonRule, headers []string) (string, error) {
-	compiled, err := compileComparisonRules(rules)
-	if err != nil {
-		return "", err
-	}
-	headerRules, err := compileHeaderRules(headers)
-	if err != nil {
-		return "", err
-	}
-	oldParts, newParts := splitTranscript(old), splitTranscript(current)
-	if len(oldParts) != len(newParts) {
-		return current, nil
-	}
-	var projected strings.Builder
-	cursor := 0
-	equal := true
-	for index, oldPart := range oldParts {
-		newPart := newParts[index]
-		if oldPart.block == nil || newPart.block == nil {
-			if oldPart.block != nil || newPart.block != nil || oldPart.literal != newPart.literal {
-				return current, nil
-			}
-			continue
-		}
-		previous, fresh := *oldPart.block, *newPart.block
-		if previous.kind != fresh.kind || previous.raw != fresh.raw {
-			return current, nil
-		}
-		if !previous.raw || !hasElision(previous.body) {
-			equal = equivalentOutputBlock(previous, fresh, compiled, headerRules) && equal
-			continue
-		}
-		replacement, matched := projectElidedOutput(previous, fresh, compiled, headerRules)
-		if !matched {
-			equal = false
-			continue
-		}
-		projected.WriteString(current[cursor:fresh.start])
-		projected.WriteString(replacement)
-		cursor = fresh.end
-		for _, part := range splitTranscript(replacement) {
-			if part.block != nil {
-				equal = previous.metadata == part.block.metadata && equal
-			}
-		}
-	}
-	if equal {
-		return old, nil
-	}
-	projected.WriteString(current[cursor:])
-	return projected.String(), nil
-}
+import "strings"
 
 func hasElision(body string) bool {
 	for _, line := range transcriptLines(body) {
@@ -76,28 +19,21 @@ func hasElision(body string) bool {
 
 func isElisionLine(line string) bool { return line == "...\n" || line == "..." }
 
-func projectElidedOutput(old, current outputBlock, rules []comparisonRule, headers map[string]struct{}) (string, bool) {
-	metadata, valid := parseOutputMetadata(current.metadata)
+func (policy comparisonPolicy) projectElidedOutput(old, current outputBlock) (encodedOutput, bool) {
+	captured, valid := decodeCapturedOutput(current)
 	if !valid {
-		return "", false
+		return encodedOutput{}, false
 	}
 	if old.metadata != "" {
 		previous, parsed := parseOutputMetadata(old.metadata)
-		if !parsed || previous.stream != metadata.stream {
-			return "", false
+		if !parsed || previous.stream != captured.stream {
+			return encodedOutput{}, false
 		}
 	}
-	raw, valid := restoreCapturedOutput(current.body, &metadata)
-	if !valid {
-		return "", false
-	}
-	rendered, err := renderOutput(raw, nil, nil, metadata.stream)
-	if err != nil || rendered != renderFencedBlock("text", current.body)+"\n"+current.metadata {
-		return "", false
-	}
-	matcher := newElisionMatcher(old.body, current, rules, headers)
+	current.metadata = ""
+	matcher := newElisionMatcher(old.body, policy.prepare(current), policy)
 	if !matcher.match(0, 0) {
-		return "", false
+		return encodedOutput{}, false
 	}
 	selected := make(map[int]bool, len(matcher.selected))
 	for _, index := range matcher.selected {
@@ -105,12 +41,12 @@ func projectElidedOutput(old, current outputBlock, rules []comparisonRule, heade
 	}
 	for _, index := range matcher.statuses {
 		if !selected[index] {
-			return "", false
+			return encodedOutput{}, false
 		}
 	}
-	rawLines := transcriptLines(raw)
+	rawLines := transcriptLines(captured.raw)
 	if len(rawLines) != len(matcher.actual) {
-		return "", false
+		return encodedOutput{}, false
 	}
 	var output strings.Builder
 	for _, index := range matcher.selected {
@@ -120,8 +56,8 @@ func projectElidedOutput(old, current outputBlock, rules []comparisonRule, heade
 			output.WriteString(rawLines[index].text)
 		}
 	}
-	rendered, err = renderOutput(output.String(), nil, nil, metadata.stream)
-	return rendered, err == nil
+	encoded, err := encodeCapturedOutput(output.String(), captured.stream)
+	return encoded, err == nil
 }
 
 type elisionPosition struct{ expected, actual int }
@@ -133,35 +69,37 @@ type elisionMatcher struct {
 	statuses []int
 	failed   map[elisionPosition]bool
 	sections map[int]responseHeaderSection
-	volatile map[int]bool
-	block    outputBlock
-	rules    []comparisonRule
-	headers  map[string]struct{}
+	values   map[int][]bodySegment
+	output   *preparedOutput
+	policy   comparisonPolicy
 }
 
-func newElisionMatcher(pattern string, block outputBlock, rules []comparisonRule, headers map[string]struct{}) *elisionMatcher {
+func newElisionMatcher(pattern string, output *preparedOutput, policy comparisonPolicy) *elisionMatcher {
 	m := &elisionMatcher{
-		expected: transcriptLines(pattern), actual: transcriptLines(block.body),
+		expected: transcriptLines(pattern), actual: output.http.lines,
 		failed: make(map[elisionPosition]bool), sections: make(map[int]responseHeaderSection),
-		volatile: make(map[int]bool), block: block, rules: rules, headers: headers,
+		values: make(map[int][]bodySegment), output: output, policy: policy,
+		statuses: output.http.statuses,
 	}
 	m.selected = make([]int, len(m.expected))
-	if index, _, found := responseHeaderStart(block, m.actual); found {
-		m.statuses = append(m.statuses, index)
-	}
-	for _, section := range responseHeaderSections(block) {
-		m.statuses = append(m.statuses, section.statusLine)
+	for _, section := range output.http.sections {
 		if len(section.headers) > 0 {
 			m.sections[section.headers[0].line] = section
 		}
 	}
-	for _, value := range outputCaptures(block, rules, headers) {
+	byLine := make(map[int][]capture)
+	for _, value := range output.captures {
 		for index, line := range m.actual {
 			if value.start >= line.offset && value.end <= line.offset+len(line.text) {
-				m.volatile[index] = true
+				value.start -= line.offset
+				value.end -= line.offset
+				byLine[index] = append(byLine[index], value)
 				break
 			}
 		}
+	}
+	for index, captures := range byLine {
+		m.values[index] = normalizeSegments(m.actual[index].text, captures)
 	}
 	return m
 }
@@ -205,22 +143,32 @@ func (m *elisionMatcher) lineMatches(expected, actual int) bool {
 	if pattern == line.text {
 		return true
 	}
-	if !m.volatile[actual] {
+	values, volatile := m.values[actual]
+	if !volatile {
 		return false
 	}
-	// Borrow the full captured context so omitted framing cannot turn body text into HTTP headers.
-	previous, current := m.block, m.block
-	previous.metadata, current.metadata = "", ""
-	previous.body = current.body[:line.offset] + pattern + current.body[line.offset+len(line.text):]
-	return equivalentOutputBlock(previous, current, m.rules, m.headers)
+	if len(m.policy.rules) > 0 {
+		// Custom patterns must also match the candidate in its complete original context.
+		candidate := m.output.block
+		candidate.body = candidate.body[:line.offset] + pattern + candidate.body[line.offset+len(line.text):]
+		return equivalentNormalizedOutput(m.policy.prepare(candidate).normalized, m.output.normalized)
+	}
+	// Header recognition comes from the full capture, never an isolated candidate line.
+	prefix := ""
+	if strings.HasPrefix(line.text, "< ") {
+		prefix = "< "
+	}
+	header, valid := parseResponseHeader(transcriptLine{text: pattern}, prefix)
+	if !valid {
+		return false
+	}
+	value, valid := headerValueCapture(pattern, header, m.policy.headers)
+	return valid && equivalentSegments(normalizeSegments(pattern, []capture{value}), values)
 }
 
 func (m *elisionMatcher) matchHeaders(start int, section responseHeaderSection) (next int, handled, matched bool) {
-	prefix := ""
-	if strings.HasPrefix(m.actual[section.headers[0].line].text, "< ") {
-		prefix = "< "
-	}
-	separator := section.headers[len(section.headers)-1].line + 1
+	prefix := section.prefix
+	separator := section.separator
 	queues := make(map[string][]int)
 	for _, header := range section.headers {
 		queues[header.name] = append(queues[header.name], header.line)
@@ -237,15 +185,11 @@ func (m *elisionMatcher) matchHeaders(start int, section responseHeaderSection) 
 			names = append(names, "")
 			continue
 		}
-		payload, valid := responseLine(m.expected[next], prefix)
+		header, valid := parseResponseHeader(m.expected[next], prefix)
 		if !valid {
 			return 0, false, false
 		}
-		match := rawHeaderPattern.FindStringSubmatchIndex(payload)
-		if match == nil || !validHeaderName(strings.ToLower(payload[match[2]:match[3]])) {
-			return 0, false, false
-		}
-		names = append(names, strings.ToLower(payload[match[2]:match[3]]))
+		names = append(names, header.name)
 	}
 	if next == len(m.expected) {
 		return 0, false, false

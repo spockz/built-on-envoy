@@ -7,6 +7,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -124,6 +125,103 @@ func TestElisionCustomComparisonAndStreamBoundaries(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestElisionProtectsStatusesWithIncompleteHeaders(t *testing.T) {
+	for _, verbose := range []bool{false, true} {
+		capture := func(body string) string {
+			if verbose {
+				body = "> GET / HTTP/1.1\n> Host: example.test\n>\n< " + strings.ReplaceAll(body, "\n", "\n< ")
+				body = strings.TrimSuffix(body, "< ")
+				body = strings.ReplaceAll(body, "< ...\n", "...\n")
+			}
+			return renderOutputForTest(t, body, nil, nil, "stdout")
+		}
+		for _, tc := range []struct {
+			name, pattern, actual string
+			equal                 bool
+		}{
+			{
+				name:    "malformed final headers",
+				pattern: "HTTP/1.1 103 Early Hints\n\n...\nbody\n",
+				actual:  "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 503 Service Unavailable\nmalformed-header\n\nbody\n",
+			},
+			{
+				name:    "truncated final headers",
+				pattern: "HTTP/1.1 103 Early Hints\n\n...\n",
+				actual:  "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 503 Service Unavailable\nX-Test: value\n",
+			},
+			{
+				name:    "final status without headers",
+				pattern: "HTTP/1.1 103 Early Hints\n\n...\n",
+				actual:  "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 503 Service Unavailable\n",
+			},
+			{
+				name:    "explicit final status with malformed headers",
+				pattern: "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 503 Service Unavailable\n...\nbody\n",
+				actual:  "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 503 Service Unavailable\nmalformed-header\n\nbody\n",
+				equal:   true,
+			},
+			{
+				name:    "HTTP-shaped body remains elidable",
+				pattern: "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 200 OK\n\n...\nbody\n",
+				actual:  "HTTP/1.1 103 Early Hints\n\nHTTP/1.1 200 OK\n\nHTTP/1.1 503 Service Unavailable\nbody\n",
+				equal:   true,
+			},
+		} {
+			t.Run(fmt.Sprintf("%s/verbose=%t", tc.name, verbose), func(t *testing.T) {
+				old, fresh := capture(tc.pattern), capture(tc.actual)
+				result, err := reconcileElidedTranscript(old, fresh, nil, nil)
+				require.NoError(t, err)
+				if tc.equal {
+					require.Equal(t, old, result)
+				} else {
+					require.Equal(t, fresh, result, "recognized statuses cannot be hidden by incomplete headers")
+				}
+			})
+		}
+	}
+}
+
+func TestElisionPreservesCustomRuleScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, pattern, previous, fresh string
+		equal                          bool
+	}{
+		{
+			name:     "reviewed value outside pattern",
+			pattern:  `(?m)^elapsed: (?P<value>1[0-9]+ms)$`,
+			previous: "...\nelapsed: 98ms\n", fresh: "ignored\nelapsed: 12ms\n",
+		},
+		{
+			name:     "fresh value outside pattern",
+			pattern:  `(?m)^elapsed: (?P<value>1[0-9]+ms)$`,
+			previous: "...\nelapsed: 12ms\n", fresh: "ignored\nelapsed: 98ms\n",
+		},
+		{
+			name:     "both values selected",
+			pattern:  `(?m)^elapsed: (?P<value>1[0-9]+ms)$`,
+			previous: "...\nelapsed: 13ms\n", fresh: "ignored\nelapsed: 12ms\n", equal: true,
+		},
+		{
+			name:     "omitted context still scopes the rule",
+			pattern:  `(?m)^before\nelapsed: (?P<value>\S+)\nafter$`,
+			previous: "...\nelapsed: 12ms\n...\n", fresh: "before\nelapsed: 98ms\nafter\n", equal: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := renderOutputForTest(t, tc.previous, nil, nil, "stdout")
+			fresh := renderOutputForTest(t, tc.fresh, nil, nil, "stdout")
+			rules := []extensions.ExampleComparisonRule{{Type: "duration", Pattern: tc.pattern}}
+			result, err := reconcileElidedTranscript(old, fresh, rules, nil)
+			require.NoError(t, err)
+			if tc.equal {
+				require.Equal(t, old, result)
+			} else {
+				require.Equal(t, fresh, result)
+			}
+		})
+	}
+}
+
 func TestElisionProjectsByteMetadata(t *testing.T) {
 	old := renderOutputForTest(t, "first \t\r\n...\nlast", nil, nil, "stdout")
 	fresh := renderOutputForTest(t, "first \t\r\nignored\r\nmore \t\nlast", nil, nil, "stdout")
@@ -173,4 +271,12 @@ func TestElisionKeepsIndependentBlocksAndMalformedMetadata(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, previous, result, "invalid fresh captures cannot be projected")
 	}
+}
+
+func reconcileElidedTranscript(old, current string, rules []extensions.ExampleComparisonRule, headers []string) (string, error) {
+	policy, err := compileComparisonPolicy(rules, headers)
+	if err != nil {
+		return "", err
+	}
+	return policy.reconcile(old, current, true), nil
 }

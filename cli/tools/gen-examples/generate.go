@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +23,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -63,11 +61,15 @@ func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (ret
 	if rootErr != nil {
 		return rootErr
 	}
+	type exampleInput struct {
+		source extensions.Example
+		policy comparisonPolicy
+	}
 	type extensionInput struct {
 		path     string
 		manifest *extensions.Manifest
 		raw      []byte
-		examples []extensions.Example
+		examples []exampleInput
 	}
 	inputs := make([]extensionInput, 0, len(opts.extensions))
 	hasExecutable := false
@@ -96,16 +98,17 @@ func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (ret
 			return fmt.Errorf("manifest example count changed while loading")
 		}
 		manifest.Path = manifestPath
+		examples := make([]exampleInput, len(sourceManifest.Examples))
 		for exampleIndex := range sourceManifest.Examples {
 			example := &sourceManifest.Examples[exampleIndex]
-			if _, compareErr := equivalentTranscript("", "", example.Comparison, example.VolatileHeaders); compareErr != nil {
+			policy, compareErr := compileComparisonPolicy(example.Comparison, example.VolatileHeaders)
+			if compareErr != nil {
 				return fmt.Errorf("invalid comparison rules in %s example %q: %w", manifestPath, example.Title, compareErr)
 			}
+			examples[exampleIndex] = exampleInput{source: *example, policy: policy}
+			hasExecutable = hasExecutable || len(example.Commands) > 0
 		}
-		for exampleIndex := range sourceManifest.Examples {
-			hasExecutable = hasExecutable || len(sourceManifest.Examples[exampleIndex].Commands) > 0
-		}
-		inputs = append(inputs, extensionInput{path: path, manifest: manifest, raw: raw, examples: sourceManifest.Examples})
+		inputs = append(inputs, extensionInput{path: path, manifest: manifest, raw: raw, examples: examples})
 	}
 	if !hasExecutable {
 		if _, printErr := fmt.Fprintln(stdout, "no executable examples found"); printErr != nil {
@@ -135,12 +138,12 @@ func generate(ctx context.Context, opts *options, stdout, stderr io.Writer) (ret
 		updates := make(map[int]string)
 		executed := false
 		for i := range input.examples {
-			example := &input.examples[i]
+			example := &input.examples[i].source
 			if len(example.Commands) == 0 {
 				continue
 			}
 			executed = true
-			code, err := runExample(ctx, root, opts, input.path, input.manifest, example, boePath, sharedData)
+			code, err := runExample(ctx, root, opts, input.path, input.manifest, example, input.examples[i].policy, boePath, sharedData)
 			if err != nil {
 				return fmt.Errorf("extension %q example %q: %w", input.manifest.Name, example.Title, err)
 			}
@@ -292,7 +295,7 @@ func resolveBoe(root, provided string) (string, func(), error) {
 	return path, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-func runExample(ctx context.Context, root string, opts *options, extensionPath string, manifest *extensions.Manifest, example *extensions.Example, boe, sharedData string) (result string, returnErr error) {
+func runExample(ctx context.Context, root string, opts *options, extensionPath string, manifest *extensions.Manifest, example *extensions.Example, policy comparisonPolicy, boe, sharedData string) (result string, returnErr error) {
 	workDir, err := os.MkdirTemp("", "boe-example-*")
 	if err != nil {
 		return "", fmt.Errorf("create temporary working directory: %w", err)
@@ -489,18 +492,7 @@ func runExample(ctx context.Context, root string, opts *options, extensionPath s
 		}
 	}
 	generatedCode := strings.TrimRight(transcript.String(), "\n") + "\n"
-	oldCode := example.Code
-	if example.ElideOutput {
-		return reconcileElidedTranscript(oldCode, generatedCode, example.Comparison, example.VolatileHeaders)
-	}
-	equal, err := equivalentTranscript(oldCode, generatedCode, example.Comparison, example.VolatileHeaders)
-	if err != nil {
-		return "", fmt.Errorf("compare generated transcript: %w", err)
-	}
-	if equal {
-		return oldCode, nil
-	}
-	return generatedCode, nil
+	return policy.reconcile(example.Code, generatedCode, example.ElideOutput), nil
 }
 
 func executeExampleCommand(ctx context.Context, timeout time.Duration, phase string, command extensions.ExampleCommand, argv, displayArgv []string, workDir string, values, outputActualValues, outputDisplayValues map[string]string) (commandTranscript, error) {
@@ -932,109 +924,6 @@ func expandString(value string, values map[string]string) (string, error) {
 		return replacement
 	})
 	return result, expansionErr
-}
-
-func renderOutput(value string, actual, display map[string]string, stream string) (string, error) {
-	keys := make([]string, 0, len(actual))
-	for key := range actual {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value = strings.ReplaceAll(value, actual[key], display[key])
-	}
-	var out strings.Builder
-	lineEndings := make([]string, 0, strings.Count(value, "\n"))
-	bareCROffsets := make([]int, 0)
-	for index := 0; index < len(value); index++ {
-		if value[index] == '\r' {
-			if index+1 < len(value) && value[index+1] == '\n' {
-				lineEndings = append(lineEndings, "CRLF")
-				out.WriteByte('\n')
-				index++
-			} else {
-				bareCROffsets = append(bareCROffsets, index)
-				out.WriteString(`\r`)
-			}
-			continue
-		}
-		if value[index] == '\n' {
-			lineEndings = append(lineEndings, "LF")
-		}
-		out.WriteByte(value[index])
-	}
-
-	normalized := out.String()
-	lines := strings.Split(normalized, "\n")
-	trailingWhitespace := make([]lineWhitespace, 0)
-	for index, line := range lines {
-		trimmed := strings.TrimRight(line, " \t")
-		if len(trimmed) != len(line) {
-			trailingWhitespace = append(trailingWhitespace, lineWhitespace{Line: index, Text: line[len(trimmed):]})
-			lines[index] = trimmed
-		}
-	}
-	normalized = strings.Join(lines, "\n")
-	var metadata strings.Builder
-	metadata.WriteString("<!-- " + stream)
-	if len(lineEndings) > 0 {
-		metadata.WriteString("; Line endings: " + strings.Join(lineEndings, ","))
-	}
-	if len(bareCROffsets) > 0 {
-		positions := make([]string, len(bareCROffsets))
-		for index, offset := range bareCROffsets {
-			positions[index] = strconv.Itoa(offset)
-		}
-		metadata.WriteString("; Bare CR offsets: " + strings.Join(positions, ","))
-	}
-	if len(trailingWhitespace) > 0 {
-		encoded, err := json.Marshal(trailingWhitespace)
-		if err != nil {
-			return "", fmt.Errorf("encode trailing whitespace metadata: %w", err)
-		}
-		metadata.WriteString("; Trailing whitespace: " + base64.StdEncoding.EncodeToString(encoded))
-	}
-	if value != "" && !strings.HasSuffix(value, "\n") {
-		metadata.WriteString("; No trailing newline")
-	}
-	metadata.WriteString(" -->\n")
-	return renderFencedBlock("text", normalized) + "\n" + metadata.String(), nil
-}
-
-type lineWhitespace struct {
-	Line int    `json:"line"`
-	Text string `json:"text"`
-}
-
-func renderFencedBlock(language, content string) string {
-	fence := markdownFence(content)
-	var block strings.Builder
-	block.WriteString(fence + language + "\n")
-	block.WriteString(content)
-	if !strings.HasSuffix(content, "\n") {
-		block.WriteByte('\n')
-	}
-	block.WriteString(fence)
-	return block.String()
-}
-
-func markdownFence(content string) string {
-	longest := 0
-	current := 0
-	for index := 0; index < len(content); index++ {
-		if content[index] == '`' {
-			current++
-			if current > longest {
-				longest = current
-			}
-		} else {
-			current = 0
-		}
-	}
-	if longest < 2 {
-		return "```"
-	}
-	return strings.Repeat("`", longest+1)
 }
 
 func isVerboseCurl(argv []string) bool {
