@@ -111,6 +111,11 @@ check: format lint test-coverage check-examples
 	# to ensure that the manifest.yaml is filled in "correctly".
 	$(MAKE) -C ../cli check
 
+ifeq ($(TYPE),composer)
+.PHONY: format lint test test-coverage
+format lint test test-coverage:
+	$(MAKE) -C "$(abspath $(EXTENSION_PATH))" "$@"
+else
 FORMAT_TARGETS := $(strip \
 	$(if $(filter true,$(HAS_GOLANG)),format-go) \
 	$(if $(filter true,$(HAS_RUST)),format-rust))
@@ -150,6 +155,7 @@ test-coverage: $(TEST_COVERAGE_TARGETS)
 ifeq ($(TEST_COVERAGE_TARGETS),)
 	@echo "Unable to detect Go or Rust sources under $(EXTENSION_PATH). Use 'make test-go-coverage' or 'make test-rust-coverage' explicitly."
 	@exit 1
+endif
 endif
 
 .PHONY: format-go
