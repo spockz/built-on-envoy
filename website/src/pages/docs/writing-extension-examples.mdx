@@ -85,6 +85,17 @@ Execution checks the local extension; the displayed `--extension` invocation use
 name and default ports, so unreleased behavior may differ. Keep the HTML comments after output
 blocks: they record streams and byte formatting and are hidden by the website.
 
+## Choose what to check
+
+| What matters? | Use | What is checked? |
+| --- | --- | --- |
+| A header's presence and date/duration format, while its value varies. | `volatileHeaders` | The retained header stays visible; value changes are allowed only within the recognized format. |
+| A date or duration in response text, while its value varies. | `comparison` | The selected value's format and the surrounding literal text. |
+| Lines that are irrelevant to the example. | `elideOutput: true` with `...` | Omitted lines are unchecked, including their presence, values, and format. |
+
+Combine these by retaining important timing headers as volatile and eliding incidental output.
+A `volatileHeaders` declaration does not validate a header hidden by elision.
+
 ## Allow varying dates and timings
 
 HTTP `Date` headers are handled automatically. List other varying response headers by name:
